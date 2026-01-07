@@ -55,11 +55,17 @@ class CUAHandler:  # Computer Use Agent Handler
         """Captures a screenshot of the current page and returns it as a base64 encoded string.
         
         Also extracts and stores the screenshot dimensions for coordinate normalization.
+        
+        Uses scale="css" to capture at 1:1 CSS pixel ratio (not device pixel ratio).
+        This ensures screenshot dimensions match the viewport dimensions, avoiding
+        DPR scaling issues with coordinate normalization.
         """
         self.logger.debug(
             "Capturing screenshot for CUA client", category=StagehandFunctionName.AGENT
         )
-        screenshot_bytes = await self.page.screenshot(full_page=False, type="png")
+        # Use scale="css" to get 1:1 CSS pixel screenshot (not 2x/3x device pixels)
+        # This ensures screenshot size matches viewport size for accurate coordinate mapping
+        screenshot_bytes = await self.page.screenshot(full_page=False, type="png", scale="css")
         
         # Extract and store screenshot dimensions
         try:
