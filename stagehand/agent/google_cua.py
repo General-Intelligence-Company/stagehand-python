@@ -158,20 +158,27 @@ class GoogleCUAClient(AgentClient):
         self.history = [initial_content]  # Start history with the first user message
         return self.history
 
-    def _normalize_coordinates(self, x: int, y: int) -> tuple[int, int]:
+    def _normalize_coordinates(self, gemini_x: int, gemini_y: int) -> tuple[int, int]:
         """Normalize Google's 0-1000 coordinates to actual viewport coordinates.
         
-        Google Gemini CUA returns coordinates in a normalized 0-1000 range.
-        This method transforms them to actual viewport pixel coordinates by:
-        1. Clamping to valid 0-999 range
-        2. Converting from 0-1000 to screenshot pixel coordinates
-        3. Scaling from screenshot pixels to viewport pixels
+        IMPORTANT: Gemini returns coordinates in (y, x) order (row, column) but labels
+        them as "x" and "y". This means gemini's "x" is actually the vertical position
+        and gemini's "y" is actually the horizontal position. We swap them here to
+        convert to standard (x, y) Cartesian coordinates for Playwright/Browserbase.
         
-        This matches the TypeScript SDK's normalizeCoordinates() implementation.
+        This method transforms coordinates by:
+        1. Swapping axes (gemini uses y,x internally but labels as x,y)
+        2. Clamping to valid 0-999 range
+        3. Converting from 0-1000 to screenshot pixel coordinates
+        4. Scaling from screenshot pixels to viewport pixels
         """
+        # Swap coordinates: Gemini's "x" is actually y (row), "y" is actually x (column)
+        raw_x = gemini_y  # Gemini's y is the horizontal position (actual x)
+        raw_y = gemini_x  # Gemini's x is the vertical position (actual y)
+        
         # Clamp to valid range (0-999)
-        x = min(999, max(0, x))
-        y = min(999, max(0, y))
+        x = min(999, max(0, raw_x))
+        y = min(999, max(0, raw_y))
         
         # Convert from 0-1000 range to screenshot pixel coordinates
         screenshot_x = (x / 1000) * self.actual_screenshot_size["width"]
@@ -187,7 +194,8 @@ class GoogleCUAClient(AgentClient):
         
         self.logger.debug(
             f"Coordinate normalization: "
-            f"raw({x}, {y}) -> screenshot({screenshot_x:.1f}, {screenshot_y:.1f}) -> "
+            f"gemini({gemini_x}, {gemini_y}) -> swapped({raw_x}, {raw_y}) -> "
+            f"screenshot({screenshot_x:.1f}, {screenshot_y:.1f}) -> "
             f"viewport({final_x}, {final_y}) "
             f"[viewport: {self.current_viewport['width']}x{self.current_viewport['height']}, "
             f"screenshot: {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}]",
