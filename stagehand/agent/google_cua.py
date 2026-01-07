@@ -60,6 +60,14 @@ class GoogleCUAClient(AgentClient):
         # to avoid coordinate transformation complexity
         self.display_width = 1000
         self.display_height = 1000
+        
+        self.logger.info(
+            f"\n{'='*60}\n"
+            f"║ GOOGLE CUA INIT\n"
+            f"║ Fixed display size: {self.display_width}x{self.display_height}\n"
+            f"{'='*60}",
+            category="agent",
+        )
 
         self._generate_content_config = GenerateContentConfig(
             temperature=1,
@@ -108,7 +116,20 @@ class GoogleCUAClient(AgentClient):
         
         Since we use a 1000x1000 viewport, Gemini's 0-1000 coordinates map directly to pixels.
         """
-        return min(999, max(0, x)), min(999, max(0, y))
+        norm_x = min(999, max(0, x))
+        norm_y = min(999, max(0, y))
+        
+        self.logger.info(
+            f"\n{'*'*60}\n"
+            f"* COORDINATE NORMALIZATION\n"
+            f"* Input from model:  x={x}, y={y}\n"
+            f"* Output normalized: x={norm_x}, y={norm_y}\n"
+            f"* Display size:      {self.display_width}x{self.display_height}\n"
+            f"{'*'*60}",
+            category="agent",
+        )
+        
+        return norm_x, norm_y
 
     def _process_provider_response(
         self, response: types.GenerateContentResponse
@@ -197,9 +218,30 @@ class GoogleCUAClient(AgentClient):
             action_type_str = ""
             action_payload_dict = {}
 
-            self.logger.info(
-                f"Function call part: {function_call_part}", category="agent"
-            )
+            # Log raw coordinates if present
+            if action_args and ("x" in action_args or "y" in action_args):
+                raw_x = action_args.get("x", "N/A")
+                raw_y = action_args.get("y", "N/A")
+                self.logger.info(
+                    f"\n{'#'*60}\n"
+                    f"# GEMINI RAW ACTION\n"
+                    f"# Action: {action_name}\n"
+                    f"# Raw X: {raw_x}\n"
+                    f"# Raw Y: {raw_y}\n"
+                    f"# Full args: {action_args}\n"
+                    f"{'#'*60}",
+                    category="agent",
+                )
+            else:
+                self.logger.info(
+                    f"\n{'#'*60}\n"
+                    f"# GEMINI RAW ACTION\n"
+                    f"# Action: {action_name}\n"
+                    f"# Args: {action_args}\n"
+                    f"{'#'*60}",
+                    category="agent",
+                )
+            
             # Map Google's function calls to our AgentActionType
             # This requires knowing the Pydantic models in ..types.agent
             # ClickAction, TypeAction, KeyPressAction, ScrollAction, GoToAction, WaitAction, MoveAction
@@ -357,6 +399,19 @@ class GoogleCUAClient(AgentClient):
                 )
 
             if action_payload_dict:  # Check if a payload was successfully constructed
+                # Log the final action payload with normalized coordinates
+                if "x" in action_payload_dict or "y" in action_payload_dict:
+                    self.logger.info(
+                        f"\n{'@'*60}\n"
+                        f"@ FINAL ACTION PAYLOAD (will be executed)\n"
+                        f"@ Type: {action_payload_dict.get('type')}\n"
+                        f"@ X: {action_payload_dict.get('x')}\n"
+                        f"@ Y: {action_payload_dict.get('y')}\n"
+                        f"@ Full payload: {action_payload_dict}\n"
+                        f"{'@'*60}",
+                        category="agent",
+                    )
+                
                 try:
                     # Directly construct the AgentActionType using the payload.
                     # Pydantic will use the 'type' field in action_payload_dict to discriminate the Union.
