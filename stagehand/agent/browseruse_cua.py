@@ -456,6 +456,13 @@ class BrowserUseCUAClient(AgentClient):
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process browser-use API response.
 
+        The response format is:
+        {
+            'completion': 'Reasoning text...\n\n<action>click [2]</action>',
+            'usage': {...},
+            'cost': {...}
+        }
+
         Returns:
             - List of AgentActions to execute
             - Reasoning text
@@ -474,52 +481,51 @@ class BrowserUseCUAClient(AgentClient):
             )
             return [], None, False, None
 
-        completion = response.get("completion", {})
+        completion = response.get("completion", "")
         self.logger.info(
-            f"[DEBUG] completion type: {type(completion).__name__}, value: {str(completion)[:200]}",
+            f"[DEBUG] completion type: {type(completion).__name__}, value: {str(completion)[:500]}",
             category=StagehandFunctionName.AGENT,
         )
 
-        if not isinstance(completion, dict):
+        # completion is a STRING containing reasoning and <action>...</action> tags
+        if not isinstance(completion, str):
             self.logger.error(
-                f"[DEBUG] completion is not a dict! Type: {type(completion).__name__}, Value: {str(completion)[:200]}",
+                f"[DEBUG] completion is not a string! Type: {type(completion).__name__}",
                 category=StagehandFunctionName.AGENT,
             )
             return [], None, False, None
 
-        # Extract reasoning
-        thinking = completion.get("thinking")
-        next_goal = completion.get("next_goal")
-        memory = completion.get("memory")
+        # Parse the completion string to extract reasoning and actions
+        reasoning, action_strings = self._parse_completion_string(completion)
 
-        reasoning_parts = []
-        if thinking:
-            reasoning_parts.append(f"Thinking: {thinking}")
-        if next_goal:
-            reasoning_parts.append(f"Goal: {next_goal}")
-        reasoning = " | ".join(reasoning_parts) if reasoning_parts else None
-
-        # Extract actions
-        actions_data = completion.get("action", [])
-        if not isinstance(actions_data, list):
-            actions_data = [actions_data] if actions_data else []
+        self.logger.info(
+            f"[DEBUG] Parsed reasoning: {reasoning[:100] if reasoning else None}...",
+            category=StagehandFunctionName.AGENT,
+        )
+        self.logger.info(
+            f"[DEBUG] Parsed actions: {action_strings}",
+            category=StagehandFunctionName.AGENT,
+        )
 
         agent_actions = []
         is_done = False
         done_message = None
 
-        for action_data in actions_data:
-            if not isinstance(action_data, dict):
+        for action_str in action_strings:
+            # Parse the action string (e.g., "click [2]", "input_text [3] hello", "done task completed")
+            action_data = self._parse_action_string(action_str)
+
+            if action_data is None:
                 continue
 
             # Check for done action
             if "done" in action_data:
                 is_done = True
-                done_info = action_data["done"]
-                if isinstance(done_info, dict):
-                    done_message = done_info.get("text", "Task completed")
-                else:
-                    done_message = str(done_info)
+                done_message = action_data["done"].get("text", "Task completed")
+                self.logger.info(
+                    f"[DEBUG] Done action detected: {done_message}",
+                    category=StagehandFunctionName.AGENT,
+                )
                 continue
 
             # Convert to AgentAction
@@ -528,6 +534,109 @@ class BrowserUseCUAClient(AgentClient):
                 agent_actions.append(agent_action)
 
         return agent_actions, reasoning, is_done, done_message
+
+    def _parse_completion_string(self, completion: str) -> tuple[Optional[str], list[str]]:
+        """Parse the completion string to extract reasoning and action strings.
+
+        Args:
+            completion: String like "Reasoning...\n\n<action>click [2]</action>"
+
+        Returns:
+            - Reasoning text (everything before first <action> tag)
+            - List of action strings (contents of <action> tags)
+        """
+        import re
+
+        # Find all <action>...</action> tags
+        action_pattern = r"<action>(.*?)</action>"
+        action_matches = re.findall(action_pattern, completion, re.DOTALL)
+
+        # Extract reasoning (everything before the first <action> tag)
+        first_action_pos = completion.find("<action>")
+        if first_action_pos > 0:
+            reasoning = completion[:first_action_pos].strip()
+        elif first_action_pos == 0:
+            reasoning = None
+        else:
+            # No action tags found
+            reasoning = completion.strip() if completion.strip() else None
+
+        return reasoning, action_matches
+
+    def _parse_action_string(self, action_str: str) -> Optional[dict[str, Any]]:
+        """Parse an action string into an action data dict.
+
+        Supported formats:
+            - "click [2]" -> {"click_element": {"index": 2}}
+            - "input_text [3] hello world" -> {"input_text": {"index": 3, "text": "hello world"}}
+            - "scroll down" -> {"scroll": {"down": True}}
+            - "scroll up" -> {"scroll": {"down": False}}
+            - "done task completed" -> {"done": {"text": "task completed"}}
+            - "go_back" -> {"go_back": {}}
+            - "navigate https://..." -> {"navigate": {"url": "https://..."}}
+
+        Args:
+            action_str: The action string from inside <action> tags
+
+        Returns:
+            Action data dict or None if parsing fails
+        """
+        import re
+
+        action_str = action_str.strip()
+
+        self.logger.info(
+            f"[DEBUG] Parsing action string: '{action_str}'",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        # click [index]
+        click_match = re.match(r"click\s*\[(\d+)\]", action_str, re.IGNORECASE)
+        if click_match:
+            index = int(click_match.group(1))
+            return {"click_element": {"index": index}}
+
+        # input_text [index] text OR type [index] text
+        input_match = re.match(r"(?:input_text|type)\s*\[(\d+)\]\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
+        if input_match:
+            index = int(input_match.group(1))
+            text = input_match.group(2).strip().strip('"\'')
+            return {"input_text": {"index": index, "text": text}}
+
+        # scroll down/up
+        scroll_match = re.match(r"scroll\s*(down|up)(?:\s+(\d+))?", action_str, re.IGNORECASE)
+        if scroll_match:
+            direction = scroll_match.group(1).lower()
+            pages = int(scroll_match.group(2)) if scroll_match.group(2) else 1
+            return {"scroll": {"down": direction == "down", "pages": pages}}
+
+        # done [message]
+        done_match = re.match(r"done\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
+        if done_match:
+            message = done_match.group(1).strip().strip('"\'') or "Task completed"
+            return {"done": {"text": message}}
+
+        # go_back
+        if re.match(r"go_back", action_str, re.IGNORECASE):
+            return {"go_back": {}}
+
+        # navigate url
+        navigate_match = re.match(r"(?:navigate|goto|go_to)\s+(.*)", action_str, re.IGNORECASE)
+        if navigate_match:
+            url = navigate_match.group(1).strip().strip('"\'')
+            return {"navigate": {"url": url}}
+
+        # send_keys keys
+        keys_match = re.match(r"(?:send_keys|press)\s+(.*)", action_str, re.IGNORECASE)
+        if keys_match:
+            keys = keys_match.group(1).strip()
+            return {"send_keys": {"keys": keys}}
+
+        self.logger.warning(
+            f"[DEBUG] Could not parse action string: '{action_str}'",
+            category=StagehandFunctionName.AGENT,
+        )
+        return None
 
     def _convert_action(self, action_data: dict[str, Any]) -> Optional[AgentAction]:
         """Convert a browser-use action to AgentAction."""
