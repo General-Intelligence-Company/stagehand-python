@@ -57,15 +57,21 @@ class Agent:
         self.stagehand = stagehand_client
         self.config = AgentConfig(**kwargs) if kwargs else AgentConfig()
         self.logger = self.stagehand.logger
-        if self.stagehand.use_api:
-            if self.config.model in MODEL_TO_PROVIDER_MAP:
-                self.provider = MODEL_TO_PROVIDER_MAP[self.config.model]
-            else:
-                self.provider = None
-                self.logger.error(
-                    f"Could not infer provider for model: {self.config.model}"
-                )
+
+        # Determine provider from model
+        if self.config.model in MODEL_TO_PROVIDER_MAP:
+            self.provider = MODEL_TO_PROVIDER_MAP[self.config.model]
         else:
+            self.provider = None
+            self.logger.error(
+                f"Could not infer provider for model: {self.config.model}"
+            )
+
+        # browser_use provider handles its own API calls, so it needs local client setup
+        # even when use_api=True
+        needs_local_client = not self.stagehand.use_api or self.provider == AgentProvider.BROWSER_USE
+
+        if needs_local_client:
             if not hasattr(self.stagehand, "page") or not hasattr(
                 self.stagehand.page, "_page"
             ):
@@ -185,7 +191,11 @@ class Agent:
 
         instruction = options.instruction
 
-        if not self.stagehand.use_api:
+        # browser_use provider handles its own API calls directly to browser-use cloud,
+        # so we should use the local client path even if use_api is True
+        use_local_client = not self.stagehand.use_api or self.provider == AgentProvider.BROWSER_USE
+
+        if use_local_client:
             self.logger.info(
                 f"Agent starting execution for instruction: '{instruction}'",
                 category="agent",
