@@ -16,6 +16,10 @@ from .client import AgentClient
 from .google_cua import GoogleCUAClient
 from .openai_cua import OpenAICUAClient
 
+# Default viewport dimensions (matches TypeScript SDK)
+DEFAULT_VIEWPORT_WIDTH = 1288
+DEFAULT_VIEWPORT_HEIGHT = 711
+
 MODEL_TO_CLIENT_CLASS_MAP: dict[str, type[AgentClient]] = {
     "computer-use-preview-2025-03-11": OpenAICUAClient,
     "claude-3-5-sonnet-latest": AnthropicCUAClient,
@@ -70,8 +74,9 @@ class Agent:
                 logger=self.logger,
             )
 
+            # viewport_size can be None when connecting via CDP (e.g., Browserbase)
+            # We'll get the real viewport from window.innerWidth/innerHeight in _init_viewport()
             self.viewport = self.stagehand.page._page.viewport_size
-            # self.viewport = {"width": 1024, "height": 768}
             self.client: AgentClient = self._get_client()
 
     def _get_client(self) -> AgentClient:
@@ -97,6 +102,40 @@ class Agent:
             viewport=self.viewport,
             experimental=self.stagehand.experimental,
         )
+
+    async def _update_viewport_from_page(self) -> None:
+        """
+        Update the client's viewport dimensions by evaluating window.innerWidth/innerHeight
+        in the browser. This is essential for Browserbase/CDP connections where Playwright's
+        viewport_size may be None or incorrect.
+        
+        This matches the TypeScript SDK's updateClientViewport() behavior.
+        """
+        try:
+            page = self.stagehand.page._page
+            # Evaluate window dimensions directly in the page (like TypeScript does)
+            dimensions = await page.evaluate(
+                "({ width: window.innerWidth, height: window.innerHeight })"
+            )
+            
+            if dimensions and dimensions.get("width") and dimensions.get("height"):
+                width = dimensions["width"]
+                height = dimensions["height"]
+                self.viewport = {"width": width, "height": height}
+                
+                # Update the client's display dimensions
+                if hasattr(self.client, "display_width"):
+                    self.client.display_width = width
+                    self.client.display_height = height
+                    self.logger.debug(
+                        f"Updated viewport from page: {width}x{height}",
+                        category="agent",
+                    )
+        except Exception as e:
+            self.logger.debug(
+                f"Could not update viewport from page: {e}",
+                category="agent",
+            )
 
     async def execute(
         self,
@@ -137,6 +176,10 @@ class Agent:
                 f"Agent starting execution for instruction: '{instruction}'",
                 category="agent",
             )
+
+            # Update viewport from the actual browser window dimensions
+            # This is crucial for Browserbase/CDP connections where viewport_size may be incorrect
+            await self._update_viewport_from_page()
 
             try:
                 agent_result = await self.client.run_task(
