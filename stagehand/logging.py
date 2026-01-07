@@ -443,11 +443,8 @@ class StagehandLogger:
             category: Optional category for the message
             auxiliary: Optional dictionary of auxiliary data
         """
-        # Skip logging if below current verbosity level
-        if not self.config.should_log(level):
-            return
-
-        # Call external logger if provided (handle async function)
+        # Call external logger FIRST if provided, regardless of verbose level
+        # The external logger callback should always receive all logs
         if self.external_logger and self.external_logger is not default_log_handler:
             # Format log data similar to TS LogLine structure
             log_data = {
@@ -475,6 +472,11 @@ class StagehandLogger:
             else:
                 # Synchronous callback, just call directly
                 self.external_logger(log_data)
+            return
+
+        # Skip console logging if below current verbosity level
+        # (external logger above always gets all logs)
+        if not self.config.should_log(level):
             return
 
         # Get level style
