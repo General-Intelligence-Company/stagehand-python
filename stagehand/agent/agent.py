@@ -12,6 +12,7 @@ from ..types.agent import (
     AgentUsage,
 )
 from .anthropic_cua import AnthropicCUAClient
+from .browseruse_cua import BrowserUseCUAClient
 from .client import AgentClient
 from .google_cua import GoogleCUAClient
 from .openai_cua import OpenAICUAClient
@@ -29,6 +30,9 @@ MODEL_TO_CLIENT_CLASS_MAP: dict[str, type[AgentClient]] = {
     "claude-sonnet-4-5-20250929": AnthropicCUAClient,
     "claude-opus-4-5-20251101": AnthropicCUAClient,
     "gemini-2.5-computer-use-preview-10-2025": GoogleCUAClient,
+    # Browser-use models
+    "bu-latest": BrowserUseCUAClient,
+    "bu-1-0": BrowserUseCUAClient,
 }
 MODEL_TO_PROVIDER_MAP: dict[str, AgentProvider] = {
     "computer-use-preview-2025-03-11": AgentProvider.OPENAI,
@@ -39,7 +43,9 @@ MODEL_TO_PROVIDER_MAP: dict[str, AgentProvider] = {
     "claude-sonnet-4-5-20250929": AgentProvider.ANTHROPIC,
     "claude-opus-4-5-20251101": AgentProvider.ANTHROPIC,
     "gemini-2.5-computer-use-preview-10-2025": AgentProvider.GOOGLE,
-    # Add more mappings as needed
+    # Browser-use models
+    "bu-latest": AgentProvider.BROWSER_USE,
+    "bu-1-0": AgentProvider.BROWSER_USE,
 }
 
 AGENT_METRIC_FUNCTION_NAME = "AGENT_EXECUTE_TASK"
