@@ -601,6 +601,12 @@ class BrowserUseCUAClient(AgentClient):
         self, completion: str
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process string completion with XML action tags (fallback mode)."""
+        # Log the raw completion string for debugging
+        self.logger.info(
+            f"[DEBUG] Raw completion string:\n{completion}",
+            category=StagehandFunctionName.AGENT,
+        )
+
         # Parse the completion string to extract reasoning and actions
         reasoning, action_dicts = self._parse_completion_string(completion)
 
@@ -778,6 +784,65 @@ class BrowserUseCUAClient(AgentClient):
             keys = attrs.get("keys", attrs.get("key", ""))
             return {"send_keys": {"keys": keys}}
 
+        elif action_type == "wait":
+            seconds = attrs.get("seconds", attrs.get("time", "3"))
+            try:
+                seconds = int(seconds)
+            except ValueError:
+                seconds = 3
+            return {"wait": {"seconds": seconds}}
+
+        elif action_type == "search":
+            query = attrs.get("query", "")
+            engine = attrs.get("engine", "duckduckgo")
+            return {"search": {"query": query, "engine": engine}}
+
+        elif action_type in ("switch", "switch_tab"):
+            tab_id = attrs.get("tab_id", attrs.get("tab", ""))
+            return {"switch_tab": {"tab_id": tab_id}}
+
+        elif action_type in ("close", "close_tab"):
+            tab_id = attrs.get("tab_id", attrs.get("tab", ""))
+            return {"close_tab": {"tab_id": tab_id}}
+
+        elif action_type == "extract":
+            query = attrs.get("query", "")
+            return {"extract": {"query": query}}
+
+        elif action_type == "find_text":
+            text = attrs.get("text", "")
+            return {"find_text": {"text": text}}
+
+        elif action_type == "screenshot":
+            return {"screenshot": {}}
+
+        elif action_type == "upload_file":
+            selector = attrs.get("selector", "")
+            path = attrs.get("path", attrs.get("file", ""))
+            index_match = re.search(r'\[(\d+)\]', selector)
+            if index_match:
+                index = int(index_match.group(1))
+                return {"upload_file": {"index": index, "path": path}}
+
+        elif action_type == "evaluate":
+            code = attrs.get("code", "")
+            return {"evaluate": {"code": code}}
+
+        elif action_type == "select_dropdown":
+            selector = attrs.get("selector", "")
+            text = attrs.get("text", attrs.get("option", ""))
+            index_match = re.search(r'\[(\d+)\]', selector)
+            if index_match:
+                index = int(index_match.group(1))
+                return {"select_dropdown": {"index": index, "text": text}}
+
+        elif action_type == "dropdown_options":
+            selector = attrs.get("selector", "")
+            index_match = re.search(r'\[(\d+)\]', selector)
+            if index_match:
+                index = int(index_match.group(1))
+                return {"dropdown_options": {"index": index}}
+
         self.logger.warning(
             f"[DEBUG] Unknown action type in attributes: '{action_type}' from '{attrs_str}'",
             category=StagehandFunctionName.AGENT,
@@ -852,6 +917,60 @@ class BrowserUseCUAClient(AgentClient):
         if keys_match:
             keys = keys_match.group(1).strip()
             return {"send_keys": {"keys": keys}}
+
+        # wait [seconds]
+        wait_match = re.match(r"wait\s*(\d+)?", action_str, re.IGNORECASE)
+        if wait_match:
+            seconds = int(wait_match.group(1)) if wait_match.group(1) else 3
+            return {"wait": {"seconds": seconds}}
+
+        # search query
+        search_match = re.match(r"search\s+(.*)", action_str, re.IGNORECASE)
+        if search_match:
+            query = search_match.group(1).strip().strip('"\'')
+            return {"search": {"query": query, "engine": "duckduckgo"}}
+
+        # switch_tab / switch [tab_id]
+        switch_match = re.match(r"(?:switch_tab|switch)\s+(.*)", action_str, re.IGNORECASE)
+        if switch_match:
+            tab_id = switch_match.group(1).strip().strip('"\'')
+            return {"switch_tab": {"tab_id": tab_id}}
+
+        # close_tab / close [tab_id]
+        close_match = re.match(r"(?:close_tab|close)\s+(.*)", action_str, re.IGNORECASE)
+        if close_match:
+            tab_id = close_match.group(1).strip().strip('"\'')
+            return {"close_tab": {"tab_id": tab_id}}
+
+        # extract query
+        extract_match = re.match(r"extract\s+(.*)", action_str, re.IGNORECASE | re.DOTALL)
+        if extract_match:
+            query = extract_match.group(1).strip().strip('"\'')
+            return {"extract": {"query": query}}
+
+        # find_text text
+        find_text_match = re.match(r"find_text\s+(.*)", action_str, re.IGNORECASE)
+        if find_text_match:
+            text = find_text_match.group(1).strip().strip('"\'')
+            return {"find_text": {"text": text}}
+
+        # screenshot
+        if re.match(r"screenshot", action_str, re.IGNORECASE):
+            return {"screenshot": {}}
+
+        # upload_file [index] path
+        upload_match = re.match(r"upload_file\s*\[(\d+)\]\s+(.*)", action_str, re.IGNORECASE)
+        if upload_match:
+            index = int(upload_match.group(1))
+            path = upload_match.group(2).strip().strip('"\'')
+            return {"upload_file": {"index": index, "path": path}}
+
+        # input [index] text (alias for input_text, used by browser-use)
+        input_match = re.match(r"input\s*\[(\d+)\]\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
+        if input_match:
+            index = int(input_match.group(1))
+            text = input_match.group(2).strip().strip('"\'')
+            return {"input_text": {"index": index, "text": text}}
 
         self.logger.warning(
             f"[DEBUG] Could not parse action content: '{action_str}'",
