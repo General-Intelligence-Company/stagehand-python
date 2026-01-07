@@ -5,11 +5,15 @@ for computer use agent tasks, with DOM extraction for optimal model accuracy.
 """
 
 import asyncio
+import base64
+import io
+import json
 import os
 import random
 from typing import Any, Optional, Union
 
 import httpx
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from ..dom.service import DomService
@@ -110,18 +114,19 @@ class BrowserUseActionModel(BaseModel):
     """Action model with one action field set at a time."""
     model_config = ConfigDict(extra="forbid")
 
-    click_element: Optional[ClickElementAction] = Field(default=None, description="Click an element")
-    input_text: Optional[InputTextAction] = Field(default=None, description="Type text into an element")
-    scroll: Optional[ScrollAction] = Field(default=None, description="Scroll the page")
-    navigate: Optional[NavigateAction] = Field(default=None, description="Navigate to URL")
-    go_back: Optional[GoBackAction] = Field(default=None, description="Go back in history")
-    send_keys: Optional[SendKeysAction] = Field(default=None, description="Send keyboard keys")
-    done: Optional[DoneAction] = Field(default=None, description="Mark task complete")
-    search: Optional[SearchAction] = Field(default=None, description="Search the web")
-    wait: Optional[WaitAction] = Field(default=None, description="Wait for time")
-    switch_tab: Optional[SwitchTabAction] = Field(default=None, description="Switch tabs")
-    close_tab: Optional[CloseTabAction] = Field(default=None, description="Close a tab")
-    extract: Optional[ExtractAction] = Field(default=None, description="Extract information")
+    # Use simple Optional types without Field() for cleaner schema
+    click_element: Optional[ClickElementAction] = None
+    input_text: Optional[InputTextAction] = None
+    scroll: Optional[ScrollAction] = None
+    navigate: Optional[NavigateAction] = None
+    go_back: Optional[GoBackAction] = None
+    send_keys: Optional[SendKeysAction] = None
+    done: Optional[DoneAction] = None
+    search: Optional[SearchAction] = None
+    wait: Optional[WaitAction] = None
+    switch_tab: Optional[SwitchTabAction] = None
+    close_tab: Optional[CloseTabAction] = None
+    extract: Optional[ExtractAction] = None
 
     def get_action(self) -> tuple[str, BaseModel] | None:
         """Get the set action type and its parameters."""
@@ -140,13 +145,13 @@ class BrowserUseAgentOutput(BaseModel):
     """Output format for browser-use API responses."""
     model_config = ConfigDict(extra="forbid")
 
-    thinking: Optional[str] = Field(default=None, description="Model's internal reasoning")
-    evaluation_previous_goal: Optional[str] = Field(default=None, description="Evaluation of previous goal")
-    memory: Optional[str] = Field(default=None, description="What to remember")
-    next_goal: Optional[str] = Field(default=None, description="Next goal to achieve")
+    # Use simple Optional types without Field() for cleaner schema
+    thinking: Optional[str] = None
+    evaluation_previous_goal: Optional[str] = None
+    memory: Optional[str] = None
+    next_goal: Optional[str] = None
     action: list[BrowserUseActionModel] = Field(
         ...,
-        description="List of actions to execute",
         json_schema_extra={"min_items": 1},
     )
 
@@ -204,6 +209,9 @@ class BrowserUseCUAClient(AgentClient):
         "end": "End",
     }
 
+    # Screenshot resize dimensions (matches browser-use SDK for Claude models)
+    LLM_SCREENSHOT_SIZE = (1400, 850)
+
     def __init__(
         self,
         model: str,
@@ -216,10 +224,12 @@ class BrowserUseCUAClient(AgentClient):
     ):
         super().__init__(model, instructions, config, logger, handler)
 
-        # API configuration
-        self.api_key = (
-            config.options.get("apiKey") if config and config.options else None
-        ) or os.getenv("BROWSER_USE_API_KEY")
+        # API configuration - accept both apiKey (camelCase) and api_key (snake_case)
+        self.api_key = None
+        if config and config.options:
+            self.api_key = config.options.get("apiKey") or config.options.get("api_key")
+        if not self.api_key:
+            self.api_key = os.getenv("BROWSER_USE_API_KEY")
 
         self.base_url = (
             config.options.get("baseUrl") if config and config.options else None
@@ -567,12 +577,13 @@ class BrowserUseCUAClient(AgentClient):
                 "text": f"Current URL: {self._current_dom_state.url}",
             })
 
-        # Add screenshot
+        # Add screenshot (resized/compressed to reduce payload size)
         if screenshot_base64:
+            resized_screenshot = self._resize_screenshot(screenshot_base64)
             user_content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:image/png;base64,{screenshot_base64}",
+                    "url": f"data:image/jpeg;base64,{resized_screenshot}",
                 },
             })
 
@@ -1087,14 +1098,20 @@ class BrowserUseCUAClient(AgentClient):
             category=StagehandFunctionName.AGENT,
         )
 
-        # click [index]
-        click_match = re.match(r"click\s*\[(\d+)\]", action_str, re.IGNORECASE)
+        # Just a number or [number] - interpret as click
+        bare_index_match = re.match(r"^\[?(\d+)\]?$", action_str.strip())
+        if bare_index_match:
+            index = int(bare_index_match.group(1))
+            return {"click_element": {"index": index}}
+
+        # click [index] or click index (with or without brackets)
+        click_match = re.match(r"click\s*\[?(\d+)\]?", action_str, re.IGNORECASE)
         if click_match:
             index = int(click_match.group(1))
             return {"click_element": {"index": index}}
 
-        # input_text [index] text OR type [index] text
-        input_match = re.match(r"(?:input_text|type)\s*\[(\d+)\]\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
+        # input_text [index] text OR type [index] text OR input index text (with or without brackets)
+        input_match = re.match(r"(?:input_text|type|input)\s*\[?(\d+)\]?\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
         if input_match:
             index = int(input_match.group(1))
             text = input_match.group(2).strip().strip('"\'')
@@ -1516,12 +1533,13 @@ class BrowserUseCUAClient(AgentClient):
                 "text": f"Current URL: {self._current_dom_state.url}",
             })
 
-        # Add screenshot
+        # Add screenshot (resized/compressed to reduce payload size)
         if new_screenshot_base64:
+            resized_screenshot = self._resize_screenshot(new_screenshot_base64)
             feedback_content.append({
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:image/png;base64,{new_screenshot_base64}",
+                    "url": f"data:image/jpeg;base64,{resized_screenshot}",
                 },
             })
 
@@ -1537,8 +1555,23 @@ class BrowserUseCUAClient(AgentClient):
             "model": self.model,
             "messages": messages,
             "request_type": "browser_agent",
-            "output_format": BrowserUseAgentOutput.model_json_schema(),
+            # Note: output_format causes intermittent 400 errors with the browser-use API
+            # so we rely on string parsing instead (which works consistently)
         }
+
+        # Debug: Log payload size
+        payload_str = json.dumps(payload)
+        self.logger.info(
+            f"[DEBUG] API payload size: {len(payload_str)} bytes ({len(payload_str) / 1024:.1f} KB)",
+            category=StagehandFunctionName.AGENT,
+        )
+        # Log individual message sizes
+        for i, msg in enumerate(messages):
+            msg_str = json.dumps(msg)
+            self.logger.info(
+                f"[DEBUG] Message {i} ({msg.get('role', 'unknown')}): {len(msg_str)} bytes",
+                category=StagehandFunctionName.AGENT,
+            )
 
         last_error = None
 
@@ -1591,12 +1624,58 @@ class BrowserUseCUAClient(AgentClient):
 
         raise ValueError(f"API call failed after {self.max_retries} attempts: {last_error}")
 
+    def _resize_screenshot(self, screenshot_b64: str) -> str:
+        """Resize screenshot to reduce payload size if needed.
+
+        Only downsizes - never upscales. Re-encodes as JPEG with quality 85
+        for significant size reduction (typically 5-10x smaller than PNG).
+        """
+        img = Image.open(io.BytesIO(base64.b64decode(screenshot_b64)))
+        original_size = img.size
+
+        # Calculate target size maintaining aspect ratio, only if larger
+        target_w, target_h = self.LLM_SCREENSHOT_SIZE
+        orig_w, orig_h = original_size
+
+        # Only resize if larger than target
+        if orig_w > target_w or orig_h > target_h:
+            # Scale to fit within target dimensions while maintaining aspect ratio
+            scale = min(target_w / orig_w, target_h / orig_h)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        # Convert to RGB (JPEG doesn't support alpha channel)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        # Encode as JPEG for much smaller size
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=85, optimize=True)
+        resized_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        self.logger.info(
+            f"[DEBUG] Screenshot processed: {original_size} -> {img.size}, "
+            f"size: {len(screenshot_b64)} -> {len(resized_b64)} bytes "
+            f"({len(resized_b64) / len(screenshot_b64) * 100:.1f}%)",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        return resized_b64
+
     def format_screenshot(self, screenshot_base64: str) -> dict[str, Any]:
-        """Format screenshot for browser-use API."""
+        """Format screenshot for browser-use API (with compression)."""
+        resized = self._resize_screenshot(screenshot_base64)
         return {
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/png;base64,{screenshot_base64}",
+                "url": f"data:image/jpeg;base64,{resized}",
             },
         }
 
