@@ -192,9 +192,29 @@ class Agent:
             if isinstance(self.client, GoogleCUAClient):
                 try:
                     page = self.stagehand.page._page
+                    
+                    # Log current viewport before resize
+                    current_viewport = page.viewport_size
+                    self.logger.info(
+                        f"GoogleCUAClient - Current browser viewport before resize: {current_viewport}",
+                        category="agent",
+                    )
+                    
                     await page.set_viewport_size({"width": 1000, "height": 1000})
-                    self.logger.debug(
-                        "Set browser viewport to 1000x1000 for GoogleCUAClient",
+                    
+                    # Log viewport after resize
+                    new_viewport = page.viewport_size
+                    self.logger.info(
+                        f"GoogleCUAClient - Browser viewport after resize: {new_viewport}",
+                        category="agent",
+                    )
+                    
+                    # Also log actual window dimensions from the page
+                    dimensions = await page.evaluate(
+                        "({ width: window.innerWidth, height: window.innerHeight })"
+                    )
+                    self.logger.info(
+                        f"GoogleCUAClient - Actual window.innerWidth/innerHeight: {dimensions}",
                         category="agent",
                     )
                 except Exception as e:
