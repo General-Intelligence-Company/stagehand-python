@@ -7,10 +7,10 @@ for computer use agent tasks, with DOM extraction for optimal model accuracy.
 import asyncio
 import os
 import random
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import httpx
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from ..dom.service import DomService
 from ..dom.views import DEFAULT_INCLUDE_ATTRIBUTES, DOMState
@@ -29,29 +29,133 @@ from ..types.agent import (
 from .client import AgentClient
 
 
-# Output format schema for browser-use API (matches browser-use's AgentOutput)
-class BrowserUseActionModel(BaseModel):
-    """Dynamic action model - one of these will be set."""
-    click_element: Optional[dict[str, Any]] = Field(default=None, description="Click an element by index")
-    input_text: Optional[dict[str, Any]] = Field(default=None, description="Type text into an element")
-    scroll: Optional[dict[str, Any]] = Field(default=None, description="Scroll the page")
-    navigate: Optional[dict[str, Any]] = Field(default=None, description="Navigate to a URL")
-    go_back: Optional[dict[str, Any]] = Field(default=None, description="Go back in browser history")
-    send_keys: Optional[dict[str, Any]] = Field(default=None, description="Send keyboard keys")
-    done: Optional[dict[str, Any]] = Field(default=None, description="Mark task as done")
+# =============================================================================
+# Action Parameter Models (matching browser-use SDK's tools/views.py)
+# =============================================================================
 
+class ClickElementAction(BaseModel):
+    """Click an element by index or coordinates."""
+    index: Optional[int] = Field(default=None, ge=1, description="Element index from browser_state")
+    coordinate_x: Optional[int] = Field(default=None, description="X coordinate relative to viewport")
+    coordinate_y: Optional[int] = Field(default=None, description="Y coordinate relative to viewport")
+
+
+class InputTextAction(BaseModel):
+    """Type text into an input field."""
+    index: int = Field(ge=0, description="Element index from browser_state")
+    text: str = Field(description="Text to type")
+    clear: bool = Field(default=True, description="Clear existing text before typing")
+
+
+class ScrollAction(BaseModel):
+    """Scroll the page."""
+    down: bool = Field(default=True, description="True to scroll down, False to scroll up")
+    pages: float = Field(default=1.0, description="Number of pages to scroll (0.5=half, 1=full, 10=to end)")
+    index: Optional[int] = Field(default=None, description="Optional element index to scroll within")
+
+
+class NavigateAction(BaseModel):
+    """Navigate to a URL."""
+    url: str = Field(description="URL to navigate to")
+    new_tab: bool = Field(default=False, description="Open in new tab")
+
+
+class GoBackAction(BaseModel):
+    """Go back in browser history."""
+    description: Optional[str] = Field(default=None, description="Optional description")
+
+
+class SendKeysAction(BaseModel):
+    """Send keyboard keys."""
+    keys: str = Field(description="Keys to send (e.g., 'Enter', 'Escape', 'Control+c')")
+
+
+class DoneAction(BaseModel):
+    """Mark task as complete."""
+    text: str = Field(description="Final message describing the result")
+    success: bool = Field(default=True, description="Whether task completed successfully")
+
+
+class SearchAction(BaseModel):
+    """Search using a search engine."""
+    query: str = Field(description="Search query")
+    engine: str = Field(default="duckduckgo", description="Search engine to use")
+
+
+class WaitAction(BaseModel):
+    """Wait for a specified time."""
+    seconds: int = Field(default=3, description="Seconds to wait")
+
+
+class SwitchTabAction(BaseModel):
+    """Switch to a different tab."""
+    tab_id: str = Field(description="Tab ID to switch to")
+
+
+class CloseTabAction(BaseModel):
+    """Close a tab."""
+    tab_id: str = Field(description="Tab ID to close")
+
+
+class ExtractAction(BaseModel):
+    """Extract information from the page."""
+    query: str = Field(description="What to extract")
+
+
+# =============================================================================
+# Action Model - Union of all action types (like browser-use's dynamic model)
+# =============================================================================
+
+class BrowserUseActionModel(BaseModel):
+    """Action model with one action field set at a time."""
+    model_config = ConfigDict(extra="forbid")
+
+    click_element: Optional[ClickElementAction] = Field(default=None, description="Click an element")
+    input_text: Optional[InputTextAction] = Field(default=None, description="Type text into an element")
+    scroll: Optional[ScrollAction] = Field(default=None, description="Scroll the page")
+    navigate: Optional[NavigateAction] = Field(default=None, description="Navigate to URL")
+    go_back: Optional[GoBackAction] = Field(default=None, description="Go back in history")
+    send_keys: Optional[SendKeysAction] = Field(default=None, description="Send keyboard keys")
+    done: Optional[DoneAction] = Field(default=None, description="Mark task complete")
+    search: Optional[SearchAction] = Field(default=None, description="Search the web")
+    wait: Optional[WaitAction] = Field(default=None, description="Wait for time")
+    switch_tab: Optional[SwitchTabAction] = Field(default=None, description="Switch tabs")
+    close_tab: Optional[CloseTabAction] = Field(default=None, description="Close a tab")
+    extract: Optional[ExtractAction] = Field(default=None, description="Extract information")
+
+    def get_action(self) -> tuple[str, BaseModel] | None:
+        """Get the set action type and its parameters."""
+        for field_name in self.model_fields:
+            value = getattr(self, field_name)
+            if value is not None:
+                return (field_name, value)
+        return None
+
+
+# =============================================================================
+# Agent Output Model (matching browser-use SDK's agent/views.py)
+# =============================================================================
 
 class BrowserUseAgentOutput(BaseModel):
     """Output format for browser-use API responses."""
+    model_config = ConfigDict(extra="forbid")
+
     thinking: Optional[str] = Field(default=None, description="Model's internal reasoning")
     evaluation_previous_goal: Optional[str] = Field(default=None, description="Evaluation of previous goal")
     memory: Optional[str] = Field(default=None, description="What to remember")
     next_goal: Optional[str] = Field(default=None, description="Next goal to achieve")
-    action: list[dict[str, Any]] = Field(
+    action: list[BrowserUseActionModel] = Field(
         ...,
         description="List of actions to execute",
-        min_length=1
+        json_schema_extra={"min_items": 1},
     )
+
+    @classmethod
+    def model_json_schema(cls, **kwargs):
+        """Override to set required fields like browser-use does."""
+        schema = super().model_json_schema(**kwargs)
+        schema["required"] = ["evaluation_previous_goal", "memory", "next_goal", "action"]
+        return schema
 
 # HTTP status codes that should trigger a retry
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -536,12 +640,84 @@ class BrowserUseCUAClient(AgentClient):
     async def _process_structured_completion(
         self, completion: dict[str, Any]
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
-        """Process structured completion dict from browser-use API."""
-        # Extract reasoning from structured fields
+        """Process structured completion dict from browser-use API.
+
+        Uses Pydantic validation to ensure the response matches our schema.
+        """
+        # Try to validate with Pydantic model
+        try:
+            validated = BrowserUseAgentOutput.model_validate(completion)
+            self.logger.info(
+                f"[DEBUG] Successfully validated completion with Pydantic",
+                category=StagehandFunctionName.AGENT,
+            )
+        except Exception as e:
+            self.logger.info(
+                f"[DEBUG] Pydantic validation failed: {e}, falling back to dict parsing",
+                category=StagehandFunctionName.AGENT,
+            )
+            # Fall back to dict-based parsing
+            return await self._process_structured_completion_dict(completion)
+
+        # Extract reasoning from validated model
+        reasoning_parts = []
+        if validated.thinking:
+            reasoning_parts.append(f"Thinking: {validated.thinking}")
+        if validated.next_goal:
+            reasoning_parts.append(f"Goal: {validated.next_goal}")
+        if validated.memory:
+            reasoning_parts.append(f"Memory: {validated.memory}")
+        reasoning = " | ".join(reasoning_parts) if reasoning_parts else None
+
+        self.logger.info(
+            f"[DEBUG] Structured completion - thinking: {validated.thinking is not None}, memory: {validated.memory is not None}, next_goal: {validated.next_goal is not None}",
+            category=StagehandFunctionName.AGENT,
+        )
+        self.logger.info(
+            f"[DEBUG] Structured completion has {len(validated.action)} actions",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        agent_actions = []
+        is_done = False
+        done_message = None
+
+        for action_model in validated.action:
+            # Get the action type and params from the model
+            action_info = action_model.get_action()
+            if not action_info:
+                continue
+
+            action_type, action_params = action_info
+            self.logger.info(
+                f"[DEBUG] Processing action: {action_type} with params: {action_params}",
+                category=StagehandFunctionName.AGENT,
+            )
+
+            # Check for done action
+            if action_type == "done":
+                is_done = True
+                done_message = action_params.text if hasattr(action_params, 'text') else "Task completed"
+                self.logger.info(
+                    f"[DEBUG] Done action detected: {done_message}",
+                    category=StagehandFunctionName.AGENT,
+                )
+                continue
+
+            # Convert to AgentAction using the validated model
+            agent_action = await self._convert_action_model(action_type, action_params)
+            if agent_action:
+                agent_actions.append(agent_action)
+
+        return agent_actions, reasoning, is_done, done_message
+
+    async def _process_structured_completion_dict(
+        self, completion: dict[str, Any]
+    ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
+        """Fallback: Process structured completion as raw dict (without Pydantic validation)."""
         thinking = completion.get("thinking")
         memory = completion.get("memory")
         next_goal = completion.get("next_goal")
-        eval_prev = completion.get("evaluation_previous_goal")
 
         reasoning_parts = []
         if thinking:
@@ -552,20 +728,9 @@ class BrowserUseCUAClient(AgentClient):
             reasoning_parts.append(f"Memory: {memory}")
         reasoning = " | ".join(reasoning_parts) if reasoning_parts else None
 
-        self.logger.info(
-            f"[DEBUG] Structured completion - thinking: {thinking is not None}, memory: {memory is not None}, next_goal: {next_goal is not None}",
-            category=StagehandFunctionName.AGENT,
-        )
-
-        # Extract actions
         action_list = completion.get("action", [])
         if not isinstance(action_list, list):
             action_list = [action_list] if action_list else []
-
-        self.logger.info(
-            f"[DEBUG] Structured completion has {len(action_list)} actions: {action_list}",
-            category=StagehandFunctionName.AGENT,
-        )
 
         agent_actions = []
         is_done = False
@@ -583,10 +748,6 @@ class BrowserUseCUAClient(AgentClient):
                     done_message = done_info.get("text", done_info.get("message", "Task completed"))
                 else:
                     done_message = str(done_info) if done_info else "Task completed"
-                self.logger.info(
-                    f"[DEBUG] Done action detected: {done_message}",
-                    category=StagehandFunctionName.AGENT,
-                )
                 continue
 
             # Convert to AgentAction
@@ -1098,8 +1259,37 @@ class BrowserUseCUAClient(AgentClient):
         )
         return None
 
+    async def _convert_action_model(
+        self, action_type: str, action_params: BaseModel
+    ) -> Optional[AgentAction]:
+        """Convert a validated Pydantic action model to AgentAction."""
+        try:
+            # Convert Pydantic model to dict for _map_action_to_stagehand
+            params_dict = action_params.model_dump(exclude_unset=True)
+
+            action_payload = await self._map_action_to_stagehand(action_type, params_dict)
+            if not action_payload:
+                return None
+
+            # Validate and create action
+            validated_action = TypeAdapter(AgentActionType).validate_python(
+                action_payload
+            )
+
+            return AgentAction(
+                action_type=action_payload.get("type", action_type),
+                action=validated_action,
+                reasoning=None,
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to convert action model: {e}")
+            import traceback
+            self.logger.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            return None
+
     async def _convert_action(self, action_data: dict[str, Any]) -> Optional[AgentAction]:
-        """Convert a browser-use action to AgentAction."""
+        """Convert a browser-use action dict to AgentAction (fallback for unvalidated dicts)."""
         try:
             # Determine action type
             action_type = None
@@ -1340,15 +1530,14 @@ class BrowserUseCUAClient(AgentClient):
     async def _make_api_call(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         """Make API call to browser-use with retry logic.
 
-        Note: We don't pass output_format because the browser-use API expects
-        a specific dynamically-generated schema from their tools registry.
-        Without output_format, we get raw text with XML action tags which
-        we parse in _process_string_completion.
+        Passes output_format schema so the API returns structured JSON
+        that we can validate with Pydantic.
         """
         payload = {
             "model": self.model,
             "messages": messages,
             "request_type": "browser_agent",
+            "output_format": BrowserUseAgentOutput.model_json_schema(),
         }
 
         last_error = None
