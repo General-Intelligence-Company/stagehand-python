@@ -1068,14 +1068,17 @@ class BrowserUseCUAClient(AgentClient):
         return [{"role": "user", "content": feedback_content}]
 
     async def _make_api_call(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        """Make API call to browser-use with retry logic."""
-        # Include output_format schema to get structured JSON responses
-        # This matches how browser-use's SDK works
+        """Make API call to browser-use with retry logic.
+
+        Note: We don't pass output_format because the browser-use API expects
+        a specific dynamically-generated schema from their tools registry.
+        Without output_format, we get raw text with XML action tags which
+        we parse in _process_string_completion.
+        """
         payload = {
             "model": self.model,
             "messages": messages,
             "request_type": "browser_agent",
-            "output_format": BrowserUseAgentOutput.model_json_schema(),
         }
 
         last_error = None
