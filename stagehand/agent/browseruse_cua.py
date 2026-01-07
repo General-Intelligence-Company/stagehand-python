@@ -843,7 +843,7 @@ class BrowserUseCUAClient(AgentClient):
                 index = int(index_match.group(1))
                 return {"dropdown_options": {"index": index}}
 
-        self.logger.warning(
+        self.logger.info(
             f"[DEBUG] Unknown action type in attributes: '{action_type}' from '{attrs_str}'",
             category=StagehandFunctionName.AGENT,
         )
@@ -972,7 +972,7 @@ class BrowserUseCUAClient(AgentClient):
             text = input_match.group(2).strip().strip('"\'')
             return {"input_text": {"index": index, "text": text}}
 
-        self.logger.warning(
+        self.logger.info(
             f"[DEBUG] Could not parse action content: '{action_str}'",
             category=StagehandFunctionName.AGENT,
         )
