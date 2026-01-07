@@ -140,6 +140,11 @@ class BrowserUseCUAClient(AgentClient):
         options: Optional[AgentExecuteOptions] = None,
     ) -> AgentResult:
         """Run a browser automation task using browser-use API."""
+        self.logger.info(
+            f"[DEBUG] run_task called with instruction: '{instruction}'",
+            category=StagehandFunctionName.AGENT,
+        )
+
         if self.config and self.config.max_steps is not None:
             max_steps = self.config.max_steps
 
@@ -160,17 +165,59 @@ class BrowserUseCUAClient(AgentClient):
                 usage=AgentUsage(input_tokens=0, output_tokens=0, inference_time_ms=0),
             )
 
+        self.logger.info(
+            "[DEBUG] Handler available, injecting cursor...",
+            category=StagehandFunctionName.AGENT,
+        )
+
         # Inject cursor for visual feedback
         await self.handler.inject_cursor()
 
+        self.logger.info(
+            "[DEBUG] Getting initial screenshot...",
+            category=StagehandFunctionName.AGENT,
+        )
+
         # Get initial state
         current_screenshot_b64 = await self.handler.get_screenshot_base64()
+
+        self.logger.info(
+            f"[DEBUG] Screenshot obtained, length: {len(current_screenshot_b64) if current_screenshot_b64 else 0}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        self.logger.info(
+            "[DEBUG] Getting DOM service...",
+            category=StagehandFunctionName.AGENT,
+        )
+
         dom_service = await self._get_dom_service()
+
+        self.logger.info(
+            "[DEBUG] Getting DOM state...",
+            category=StagehandFunctionName.AGENT,
+        )
+
         self._current_dom_state = await dom_service.get_dom_state()
+
+        self.logger.info(
+            f"[DEBUG] DOM state obtained: {self._current_dom_state is not None}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        self.logger.info(
+            "[DEBUG] Formatting initial messages...",
+            category=StagehandFunctionName.AGENT,
+        )
 
         # Format initial messages
         messages = self._format_initial_messages(
             instruction, current_screenshot_b64
+        )
+
+        self.logger.info(
+            f"[DEBUG] Initial messages formatted, count: {len(messages)}",
+            category=StagehandFunctionName.AGENT,
         )
 
         actions_taken: list[AgentAction] = []
@@ -187,20 +234,45 @@ class BrowserUseCUAClient(AgentClient):
             )
 
             # Make API call
+            self.logger.info(
+                "[DEBUG] Making API call...",
+                category=StagehandFunctionName.AGENT,
+            )
+
             start_time = asyncio.get_event_loop().time()
             try:
                 response = await self._make_api_call(messages)
                 end_time = asyncio.get_event_loop().time()
                 total_inference_time_ms += int((end_time - start_time) * 1000)
 
-                # Extract usage
-                usage = response.get("usage", {})
-                total_input_tokens += usage.get("prompt_tokens", 0)
-                total_output_tokens += usage.get("completion_tokens", 0)
+                self.logger.info(
+                    f"[DEBUG] API response received. Type: {type(response).__name__}",
+                    category=StagehandFunctionName.AGENT,
+                )
+                self.logger.info(
+                    f"[DEBUG] API response content: {str(response)[:500]}...",
+                    category=StagehandFunctionName.AGENT,
+                )
+
+                # Extract usage - with safety check
+                if isinstance(response, dict):
+                    usage = response.get("usage", {})
+                    total_input_tokens += usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+                    total_output_tokens += usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+                else:
+                    self.logger.error(
+                        f"[DEBUG] Response is not a dict! Type: {type(response).__name__}, Value: {response}",
+                        category=StagehandFunctionName.AGENT,
+                    )
 
             except Exception as e:
                 self.logger.error(
                     f"BrowserUse API call failed: {e}",
+                    category=StagehandFunctionName.AGENT,
+                )
+                import traceback
+                self.logger.error(
+                    f"[DEBUG] Full traceback: {traceback.format_exc()}",
                     category=StagehandFunctionName.AGENT,
                 )
                 return AgentResult(
@@ -215,12 +287,22 @@ class BrowserUseCUAClient(AgentClient):
                 )
 
             # Process response
+            self.logger.info(
+                "[DEBUG] Processing provider response...",
+                category=StagehandFunctionName.AGENT,
+            )
+
             (
                 agent_actions,
                 reasoning,
                 is_done,
                 done_message,
             ) = self._process_provider_response(response)
+
+            self.logger.info(
+                f"[DEBUG] Processed response - actions: {len(agent_actions)}, reasoning: {reasoning is not None}, is_done: {is_done}",
+                category=StagehandFunctionName.AGENT,
+            )
 
             if reasoning:
                 self.logger.info(
@@ -241,24 +323,64 @@ class BrowserUseCUAClient(AgentClient):
 
             # Execute actions
             if agent_actions:
-                for agent_action in agent_actions:
+                self.logger.info(
+                    f"[DEBUG] Executing {len(agent_actions)} actions...",
+                    category=StagehandFunctionName.AGENT,
+                )
+
+                for idx, agent_action in enumerate(agent_actions):
+                    self.logger.info(
+                        f"[DEBUG] Executing action {idx + 1}/{len(agent_actions)}: {agent_action}",
+                        category=StagehandFunctionName.AGENT,
+                    )
+
                     actions_taken.append(agent_action)
 
                     # Execute the action
+                    self.logger.info(
+                        "[DEBUG] Calling handler.perform_action...",
+                        category=StagehandFunctionName.AGENT,
+                    )
+
                     action_result: ActionExecutionResult = (
                         await self.handler.perform_action(agent_action)
                     )
 
+                    self.logger.info(
+                        f"[DEBUG] Action result type: {type(action_result).__name__}",
+                        category=StagehandFunctionName.AGENT,
+                    )
+                    self.logger.info(
+                        f"[DEBUG] Action result: {action_result}",
+                        category=StagehandFunctionName.AGENT,
+                    )
+
                     # Get new state after action
+                    self.logger.info(
+                        "[DEBUG] Getting new screenshot after action...",
+                        category=StagehandFunctionName.AGENT,
+                    )
+
                     current_screenshot_b64 = await self.handler.get_screenshot_base64()
                     self._current_dom_state = await dom_service.get_dom_state()
 
                     # Format feedback
+                    self.logger.info(
+                        "[DEBUG] Formatting action feedback...",
+                        category=StagehandFunctionName.AGENT,
+                    )
+
                     feedback = self._format_action_feedback(
                         action=agent_action,
                         action_result=action_result,
                         new_screenshot_base64=current_screenshot_b64,
                     )
+
+                    self.logger.info(
+                        f"[DEBUG] Feedback formatted, extending messages with {len(feedback)} items",
+                        category=StagehandFunctionName.AGENT,
+                    )
+
                     messages.extend(feedback)
 
             else:
@@ -268,6 +390,11 @@ class BrowserUseCUAClient(AgentClient):
                     category=StagehandFunctionName.AGENT,
                 )
                 break
+
+        self.logger.info(
+            f"[DEBUG] run_task completing. completed={task_completed}, actions={len(actions_taken)}",
+            category=StagehandFunctionName.AGENT,
+        )
 
         return AgentResult(
             actions=[act.action for act in actions_taken if act.action],
@@ -335,7 +462,30 @@ class BrowserUseCUAClient(AgentClient):
             - Whether task is done
             - Done message (if task is done)
         """
+        self.logger.info(
+            f"[DEBUG] _process_provider_response called. response type: {type(response).__name__}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        if not isinstance(response, dict):
+            self.logger.error(
+                f"[DEBUG] Response is not a dict! Type: {type(response).__name__}, Value: {str(response)[:200]}",
+                category=StagehandFunctionName.AGENT,
+            )
+            return [], None, False, None
+
         completion = response.get("completion", {})
+        self.logger.info(
+            f"[DEBUG] completion type: {type(completion).__name__}, value: {str(completion)[:200]}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        if not isinstance(completion, dict):
+            self.logger.error(
+                f"[DEBUG] completion is not a dict! Type: {type(completion).__name__}, Value: {str(completion)[:200]}",
+                category=StagehandFunctionName.AGENT,
+            )
+            return [], None, False, None
 
         # Extract reasoning
         thinking = completion.get("thinking")
