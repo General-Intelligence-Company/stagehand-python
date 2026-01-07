@@ -195,26 +195,25 @@ class Agent:
                     
                     # Log current viewport before resize
                     current_viewport = page.viewport_size
-                    self.logger.info(
-                        f"GoogleCUAClient - Current browser viewport before resize: {current_viewport}",
-                        category="agent",
-                    )
                     
                     await page.set_viewport_size({"width": 1000, "height": 1000})
                     
                     # Log viewport after resize
                     new_viewport = page.viewport_size
-                    self.logger.info(
-                        f"GoogleCUAClient - Browser viewport after resize: {new_viewport}",
-                        category="agent",
-                    )
                     
                     # Also log actual window dimensions from the page
                     dimensions = await page.evaluate(
                         "({ width: window.innerWidth, height: window.innerHeight })"
                     )
+                    
                     self.logger.info(
-                        f"GoogleCUAClient - Actual window.innerWidth/innerHeight: {dimensions}",
+                        f"\n{'='*60}\n"
+                        f"║ GOOGLE CUA VIEWPORT RESIZE\n"
+                        f"║ Before resize:     {current_viewport}\n"
+                        f"║ After resize:      {new_viewport}\n"
+                        f"║ window.innerWidth: {dimensions.get('width')}\n"
+                        f"║ window.innerHeight:{dimensions.get('height')}\n"
+                        f"{'='*60}",
                         category="agent",
                     )
                 except Exception as e:
