@@ -903,6 +903,51 @@ class BrowserUseCUAClient(AgentClient):
 
         return reasoning, actions
 
+    def _sanitize_text_value(self, text: str) -> str:
+        """Sanitize text value by removing XML/markup artifacts.
+
+        The model sometimes outputs malformed responses where XML tags leak into
+        text values, e.g., 'email@example.com"\n</execute_action>'. This method
+        cleans such artifacts.
+
+        Args:
+            text: The raw text value to sanitize
+
+        Returns:
+            Cleaned text with artifacts removed
+        """
+        import re
+
+        if not text:
+            return text
+
+        original_text = text
+
+        # Remove trailing XML-like tags (e.g., </execute_action>, </action>, etc.)
+        # These can appear when the model's output is malformed
+        text = re.sub(r'</?[\w_-]+>.*$', '', text, flags=re.DOTALL)
+
+        # Remove trailing escaped newlines and quotes that precede XML tags
+        # Pattern: trailing quote + optional whitespace/newlines + end
+        text = re.sub(r'["\']?\s*\\n\s*$', '', text)
+        text = re.sub(r'["\']?\s*$', '', text)
+
+        # Strip any remaining leading/trailing whitespace
+        text = text.strip()
+
+        # Also strip surrounding quotes if present (in case of double-quoting)
+        if (text.startswith('"') and text.endswith('"')) or \
+           (text.startswith("'") and text.endswith("'")):
+            text = text[1:-1]
+
+        if text != original_text:
+            self.logger.info(
+                f"[DEBUG] Sanitized text: '{original_text}' -> '{text}'",
+                category=StagehandFunctionName.AGENT,
+            )
+
+        return text
+
     def _parse_action_attributes(self, attrs_str: str) -> Optional[dict[str, Any]]:
         """Parse action attributes from a self-closing tag.
 
@@ -972,7 +1017,7 @@ class BrowserUseCUAClient(AgentClient):
         elif action_type in ("input_text", "type", "input"):
             index = get_index_from_attrs(attrs)
             selector = attrs.get("selector", "")
-            text = attrs.get("text", attrs.get("value", ""))
+            text = self._sanitize_text_value(attrs.get("text", attrs.get("value", "")))
 
             if index is not None:
                 return {"input_text": {"index": index, "text": text}}
@@ -1114,7 +1159,7 @@ class BrowserUseCUAClient(AgentClient):
         input_match = re.match(r"(?:input_text|type|input)\s*\[?(\d+)\]?\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
         if input_match:
             index = int(input_match.group(1))
-            text = input_match.group(2).strip().strip('"\'')
+            text = self._sanitize_text_value(input_match.group(2).strip().strip('"\''))
             return {"input_text": {"index": index, "text": text}}
 
         # Function call syntax: type_text(index, "text") or type("index", "text")
@@ -1126,7 +1171,7 @@ class BrowserUseCUAClient(AgentClient):
             index_str = func_call_match.group(1)
             # Handle [2] or just 2
             index = int(re.search(r'\d+', index_str).group())
-            text = func_call_match.group(2)
+            text = self._sanitize_text_value(func_call_match.group(2))
             return {"input_text": {"index": index, "text": text}}
 
         # Colon format: type: text, index OR type: text, selector
@@ -1135,7 +1180,7 @@ class BrowserUseCUAClient(AgentClient):
             action_str, re.IGNORECASE
         )
         if colon_match:
-            text = colon_match.group(1).strip().strip('"\'')
+            text = self._sanitize_text_value(colon_match.group(1).strip().strip('"\''))
             target = colon_match.group(2).strip().strip('"\'')
             # Check if target is an index
             if target.isdigit():
@@ -1153,7 +1198,7 @@ class BrowserUseCUAClient(AgentClient):
             action_str, re.IGNORECASE
         )
         if into_match:
-            text = into_match.group(1).strip().strip('"\'')
+            text = self._sanitize_text_value(into_match.group(1).strip().strip('"\''))
             selector = into_match.group(2).strip().strip('"\'')
             # Check if selector is an index
             if re.match(r'^\[\d+\]$', selector):
@@ -1169,7 +1214,7 @@ class BrowserUseCUAClient(AgentClient):
         )
         if css_type_match:
             selector = css_type_match.group(1).strip()
-            text = css_type_match.group(2).strip().strip('"\'')
+            text = self._sanitize_text_value(css_type_match.group(2).strip().strip('"\''))
             return {"input_text": {"css_selector": selector, "text": text}}
 
         # Check for multiple actions in one string (e.g., "type_text #id text click [7]")
@@ -1204,11 +1249,13 @@ class BrowserUseCUAClient(AgentClient):
         if re.match(r"go_back", action_str, re.IGNORECASE):
             return {"go_back": {}}
 
-        # navigate url
-        navigate_match = re.match(r"(?:navigate|goto|go_to)\s+(.*)", action_str, re.IGNORECASE)
+        # navigate url - only match actual URLs (http/https or common domains)
+        navigate_match = re.match(r"(?:navigate|goto|go_to|go\s+to)\s+[\"']?(https?://[^\s\"']+|www\.[^\s\"']+|\S+\.\S+/[^\s\"']*)[\"']?", action_str, re.IGNORECASE)
         if navigate_match:
             url = navigate_match.group(1).strip().strip('"\'')
-            return {"navigate": {"url": url}}
+            # Validate it looks like a URL
+            if '.' in url or url.startswith('http'):
+                return {"navigate": {"url": url}}
 
         # send_keys keys
         keys_match = re.match(r"(?:send_keys|press)\s+(.*)", action_str, re.IGNORECASE)
@@ -1267,7 +1314,7 @@ class BrowserUseCUAClient(AgentClient):
         input_match = re.match(r"input\s*\[(\d+)\]\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
         if input_match:
             index = int(input_match.group(1))
-            text = input_match.group(2).strip().strip('"\'')
+            text = self._sanitize_text_value(input_match.group(2).strip().strip('"\''))
             return {"input_text": {"index": index, "text": text}}
 
         self.logger.info(
@@ -1402,7 +1449,8 @@ class BrowserUseCUAClient(AgentClient):
         elif action_type == "input_text":
             index = params.get("index")
             css_selector = params.get("css_selector")
-            text = params.get("text", "")
+            # Sanitize text as a final safeguard against XML artifacts
+            text = self._sanitize_text_value(params.get("text", ""))
 
             # Get coordinates for the input element
             x, y = None, None
