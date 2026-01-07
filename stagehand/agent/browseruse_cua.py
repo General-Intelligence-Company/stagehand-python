@@ -496,14 +496,15 @@ class BrowserUseCUAClient(AgentClient):
             return [], None, False, None
 
         # Parse the completion string to extract reasoning and actions
-        reasoning, action_strings = self._parse_completion_string(completion)
+        # _parse_completion_string now returns action dicts directly
+        reasoning, action_dicts = self._parse_completion_string(completion)
 
         self.logger.info(
             f"[DEBUG] Parsed reasoning: {reasoning[:100] if reasoning else None}...",
             category=StagehandFunctionName.AGENT,
         )
         self.logger.info(
-            f"[DEBUG] Parsed actions: {action_strings}",
+            f"[DEBUG] Parsed action dicts: {action_dicts}",
             category=StagehandFunctionName.AGENT,
         )
 
@@ -511,10 +512,7 @@ class BrowserUseCUAClient(AgentClient):
         is_done = False
         done_message = None
 
-        for action_str in action_strings:
-            # Parse the action string (e.g., "click [2]", "input_text [3] hello", "done task completed")
-            action_data = self._parse_action_string(action_str)
-
+        for action_data in action_dicts:
             if action_data is None:
                 continue
 
@@ -535,24 +533,59 @@ class BrowserUseCUAClient(AgentClient):
 
         return agent_actions, reasoning, is_done, done_message
 
-    def _parse_completion_string(self, completion: str) -> tuple[Optional[str], list[str]]:
-        """Parse the completion string to extract reasoning and action strings.
+    def _parse_completion_string(self, completion: str) -> tuple[Optional[str], list[dict[str, Any]]]:
+        """Parse the completion string to extract reasoning and actions.
+
+        Handles two action formats:
+        1. Self-closing XML: <action type="click" selector="[2]"/>
+        2. Content-based: <action>click [2]</action>
 
         Args:
-            completion: String like "Reasoning...\n\n<action>click [2]</action>"
+            completion: String like 'Reasoning...\n\n<action type="click" selector="[2]"/>'
 
         Returns:
             - Reasoning text (everything before first <action> tag)
-            - List of action strings (contents of <action> tags)
+            - List of parsed action dicts
         """
         import re
 
-        # Find all <action>...</action> tags
-        action_pattern = r"<action>(.*?)</action>"
-        action_matches = re.findall(action_pattern, completion, re.DOTALL)
+        self.logger.info(
+            f"[DEBUG] _parse_completion_string input: '{completion}'",
+            category=StagehandFunctionName.AGENT,
+        )
 
-        # Extract reasoning (everything before the first <action> tag)
-        first_action_pos = completion.find("<action>")
+        actions = []
+
+        # Pattern 1: Self-closing XML tags like <action type="click" selector="[2]"/>
+        # This matches <action followed by attributes and ending with />
+        self_closing_pattern = r'<action\s+([^>]*?)\s*/>'
+        self_closing_matches = re.finditer(self_closing_pattern, completion, re.DOTALL)
+
+        for match in self_closing_matches:
+            attrs_str = match.group(1)
+            self.logger.info(
+                f"[DEBUG] Found self-closing action tag with attrs: '{attrs_str}'",
+                category=StagehandFunctionName.AGENT,
+            )
+            action_dict = self._parse_action_attributes(attrs_str)
+            if action_dict:
+                actions.append(action_dict)
+
+        # Pattern 2: Content-based tags like <action>click [2]</action>
+        content_pattern = r'<action>(.*?)</action>'
+        content_matches = re.findall(content_pattern, completion, re.DOTALL)
+
+        for content in content_matches:
+            self.logger.info(
+                f"[DEBUG] Found content-based action tag: '{content}'",
+                category=StagehandFunctionName.AGENT,
+            )
+            action_dict = self._parse_action_content(content.strip())
+            if action_dict:
+                actions.append(action_dict)
+
+        # Extract reasoning (everything before the first <action tag)
+        first_action_pos = completion.find("<action")
         if first_action_pos > 0:
             reasoning = completion[:first_action_pos].strip()
         elif first_action_pos == 0:
@@ -561,10 +594,93 @@ class BrowserUseCUAClient(AgentClient):
             # No action tags found
             reasoning = completion.strip() if completion.strip() else None
 
-        return reasoning, action_matches
+        self.logger.info(
+            f"[DEBUG] Parsed {len(actions)} actions, reasoning: {reasoning[:100] if reasoning else None}...",
+            category=StagehandFunctionName.AGENT,
+        )
 
-    def _parse_action_string(self, action_str: str) -> Optional[dict[str, Any]]:
-        """Parse an action string into an action data dict.
+        return reasoning, actions
+
+    def _parse_action_attributes(self, attrs_str: str) -> Optional[dict[str, Any]]:
+        """Parse action attributes from a self-closing tag.
+
+        Example: type="click" selector="[2]"
+
+        Args:
+            attrs_str: The attributes string from inside the tag
+
+        Returns:
+            Action data dict or None if parsing fails
+        """
+        import re
+
+        self.logger.info(
+            f"[DEBUG] Parsing action attributes: '{attrs_str}'",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        # Extract all attribute key="value" pairs
+        attr_pattern = r'(\w+)\s*=\s*["\']([^"\']*)["\']'
+        attrs = dict(re.findall(attr_pattern, attrs_str))
+
+        self.logger.info(
+            f"[DEBUG] Extracted attributes: {attrs}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        action_type = attrs.get("type", "").lower()
+
+        if action_type == "click":
+            # selector="[2]" -> extract index 2
+            selector = attrs.get("selector", "")
+            index_match = re.search(r'\[(\d+)\]', selector)
+            if index_match:
+                index = int(index_match.group(1))
+                return {"click_element": {"index": index}}
+            # Maybe selector is just a number
+            if selector.isdigit():
+                return {"click_element": {"index": int(selector)}}
+
+        elif action_type in ("input_text", "type", "input"):
+            selector = attrs.get("selector", "")
+            text = attrs.get("text", attrs.get("value", ""))
+            index_match = re.search(r'\[(\d+)\]', selector)
+            if index_match:
+                index = int(index_match.group(1))
+                return {"input_text": {"index": index, "text": text}}
+
+        elif action_type == "scroll":
+            direction = attrs.get("direction", "down").lower()
+            amount = attrs.get("amount", "1")
+            try:
+                pages = int(amount)
+            except ValueError:
+                pages = 1
+            return {"scroll": {"down": direction == "down", "pages": pages}}
+
+        elif action_type == "done":
+            message = attrs.get("message", attrs.get("text", "Task completed"))
+            return {"done": {"text": message}}
+
+        elif action_type in ("navigate", "goto"):
+            url = attrs.get("url", attrs.get("href", ""))
+            return {"navigate": {"url": url}}
+
+        elif action_type in ("go_back", "back"):
+            return {"go_back": {}}
+
+        elif action_type in ("send_keys", "press", "key"):
+            keys = attrs.get("keys", attrs.get("key", ""))
+            return {"send_keys": {"keys": keys}}
+
+        self.logger.warning(
+            f"[DEBUG] Unknown action type in attributes: '{action_type}' from '{attrs_str}'",
+            category=StagehandFunctionName.AGENT,
+        )
+        return None
+
+    def _parse_action_content(self, action_str: str) -> Optional[dict[str, Any]]:
+        """Parse an action string from content-based tags.
 
         Supported formats:
             - "click [2]" -> {"click_element": {"index": 2}}
@@ -576,7 +692,7 @@ class BrowserUseCUAClient(AgentClient):
             - "navigate https://..." -> {"navigate": {"url": "https://..."}}
 
         Args:
-            action_str: The action string from inside <action> tags
+            action_str: The action string from inside <action>...</action> tags
 
         Returns:
             Action data dict or None if parsing fails
@@ -586,7 +702,7 @@ class BrowserUseCUAClient(AgentClient):
         action_str = action_str.strip()
 
         self.logger.info(
-            f"[DEBUG] Parsing action string: '{action_str}'",
+            f"[DEBUG] Parsing action content: '{action_str}'",
             category=StagehandFunctionName.AGENT,
         )
 
@@ -633,7 +749,7 @@ class BrowserUseCUAClient(AgentClient):
             return {"send_keys": {"keys": keys}}
 
         self.logger.warning(
-            f"[DEBUG] Could not parse action string: '{action_str}'",
+            f"[DEBUG] Could not parse action content: '{action_str}'",
             category=StagehandFunctionName.AGENT,
         )
         return None
