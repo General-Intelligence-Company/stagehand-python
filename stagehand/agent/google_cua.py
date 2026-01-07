@@ -100,9 +100,14 @@ class GoogleCUAClient(AgentClient):
 
     def set_viewport(self, width: int, height: int) -> None:
         """Set the current viewport dimensions."""
+        old_viewport = self.current_viewport.copy()
         self.current_viewport = {"width": width, "height": height}
-        self.logger.debug(
-            f"GoogleCUAClient viewport updated: {width}x{height}",
+        self.logger.info(
+            f"\n{'='*60}\n"
+            f"║ VIEWPORT UPDATED\n"
+            f"║ Old: {old_viewport['width']}x{old_viewport['height']}\n"
+            f"║ New: {width}x{height}\n"
+            f"{'='*60}",
             category="agent",
         )
 
@@ -172,32 +177,50 @@ class GoogleCUAClient(AgentClient):
     def _normalize_coordinates(self, x: int, y: int) -> tuple[int, int]:
         """Normalize Google's 0-999 coordinates to actual viewport coordinates.
         
-        Google Gemini CUA works in a NORMALIZED coordinate space (0-999), treating
-        the screen as a virtual 1000x1000 grid regardless of actual dimensions.
+        Google Gemini CUA returns coordinates where the first value appears to be
+        the vertical position (row) and the second is horizontal (column).
+        We swap them here to convert to standard (x, y) where x=horizontal, y=vertical.
         
-        This method converts from normalized 0-999 space directly to viewport pixels:
-        - final_x = (normalized_x / 1000) * viewport_width
-        - final_y = (normalized_y / 1000) * viewport_height
-        
-        The screenshot dimensions are irrelevant - Gemini always works in normalized space.
+        This method matches the TypeScript SDK's normalizeCoordinates() which uses:
+        1. Scale from 0-1000 to screenshot dimensions
+        2. Then scale from screenshot to viewport dimensions
         """
         raw_x, raw_y = x, y
+        
+        # SWAP coordinates: Gemini appears to return (row, col) not (x, y)
+        # So the first coordinate is vertical (y) and second is horizontal (x)
+        x, y = y, x
+        
+        self.logger.info(
+            f"Swapping Gemini coords: raw ({raw_x}, {raw_y}) -> swapped ({x}, {y})",
+            category="agent",
+        )
         
         # Clamp to valid range (0-999)
         x = min(999, max(0, x))
         y = min(999, max(0, y))
         
-        # Convert directly from normalized 0-999 space to viewport pixels
-        # Gemini treats the screen as 1000x1000 regardless of actual size
-        final_x = int((x / 1000) * self.current_viewport["width"])
-        final_y = int((y / 1000) * self.current_viewport["height"])
+        # Match TypeScript SDK's two-step calculation:
+        # 1. Scale from 0-1000 normalized to screenshot pixel space
+        screenshot_x = (x / 1000) * self.actual_screenshot_size["width"]
+        screenshot_y = (y / 1000) * self.actual_screenshot_size["height"]
+        
+        # 2. Scale from screenshot space to viewport space
+        scale_x = self.current_viewport["width"] / self.actual_screenshot_size["width"]
+        scale_y = self.current_viewport["height"] / self.actual_screenshot_size["height"]
+        
+        final_x = int(screenshot_x * scale_x)
+        final_y = int(screenshot_y * scale_y)
         
         self.logger.info(
             f"\n{'='*60}\n"
-            f"║ COORDINATE NORMALIZATION\n"
-            f"║ Gemini normalized (0-999): x={raw_x}, y={raw_y}\n"
-            f"║ After clamp (0-999):       x={x}, y={y}\n"
+            f"║ COORDINATE NORMALIZATION (with swap)\n"
+            f"║ Gemini raw:                ({raw_x}, {raw_y})\n"
+            f"║ After swap (x, y):         ({x}, {y})\n"
+            f"║ Screenshot size:           {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}\n"
             f"║ Viewport size:             {self.current_viewport['width']}x{self.current_viewport['height']}\n"
+            f"║ Scale factors:             x={scale_x:.4f}, y={scale_y:.4f}\n"
+            f"║ Screenshot coords:         x={screenshot_x:.1f}, y={screenshot_y:.1f}\n"
             f"║ Final viewport pixels:     x={final_x}, y={final_y}\n"
             f"{'='*60}",
             category="agent",
@@ -576,11 +599,6 @@ class GoogleCUAClient(AgentClient):
         max_steps: int = 20,
         options: Optional[AgentExecuteOptions] = None,
     ) -> AgentResult:
-        self.logger.debug(
-            f"Gemini CUA starting task: '{instruction}' with max_steps: {max_steps}",
-            category="agent",
-        )
-
         if not self.handler:
             self.logger.error(
                 "CUAHandler not available for GoogleCUAClient.", category="agent"
@@ -592,12 +610,67 @@ class GoogleCUAClient(AgentClient):
                 usage={"input_tokens": 0, "output_tokens": 0, "inference_time_ms": 0},
             )
 
+        # Query actual browser dimensions for diagnostic purposes
+        try:
+            browser_dimensions = await self.handler.page.evaluate(
+                "({ innerWidth: window.innerWidth, innerHeight: window.innerHeight, "
+                "outerWidth: window.outerWidth, outerHeight: window.outerHeight, "
+                "screenWidth: screen.width, screenHeight: screen.height, "
+                "devicePixelRatio: window.devicePixelRatio })"
+            )
+        except Exception as e:
+            browser_dimensions = {"error": str(e)}
+
+        # Log current viewport at task start with diagnostic info
+        self.logger.info(
+            f"\n{'#'*60}\n"
+            f"# GEMINI CUA TASK START - DIAGNOSTIC INFO\n"
+            f"# Instruction: {instruction[:50]}{'...' if len(instruction) > 50 else ''}\n"
+            f"# Max steps: {max_steps}\n"
+            f"#\n"
+            f"# INTERNAL STATE:\n"
+            f"#   Current viewport:     {self.current_viewport['width']}x{self.current_viewport['height']}\n"
+            f"#   Screenshot size:      {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}\n"
+            f"#\n"
+            f"# BROWSER REPORTED:\n"
+            f"#   window.innerWidth/Height:  {browser_dimensions.get('innerWidth')}x{browser_dimensions.get('innerHeight')}\n"
+            f"#   window.outerWidth/Height:  {browser_dimensions.get('outerWidth')}x{browser_dimensions.get('outerHeight')}\n"
+            f"#   screen.width/height:       {browser_dimensions.get('screenWidth')}x{browser_dimensions.get('screenHeight')}\n"
+            f"#   devicePixelRatio:          {browser_dimensions.get('devicePixelRatio')}\n"
+            f"{'#'*60}",
+            category="agent",
+        )
+        
+        # Update internal viewport to match browser if they differ
+        browser_inner_w = browser_dimensions.get('innerWidth')
+        browser_inner_h = browser_dimensions.get('innerHeight')
+        if browser_inner_w and browser_inner_h:
+            if (browser_inner_w != self.current_viewport['width'] or 
+                browser_inner_h != self.current_viewport['height']):
+                self.logger.warning(
+                    f"Viewport mismatch! Internal: {self.current_viewport['width']}x{self.current_viewport['height']}, "
+                    f"Browser: {browser_inner_w}x{browser_inner_h}. Updating to browser values.",
+                    category="agent",
+                )
+                self.set_viewport(browser_inner_w, browser_inner_h)
+
         await self.handler.inject_cursor()
         current_screenshot_b64 = await self.handler.get_screenshot_base64()
         current_url = self.handler.page.url
         
         # Update screenshot dimensions from handler (extracted from PNG header)
         self._sync_screenshot_dimensions_from_handler()
+        
+        # Log final dimensions after screenshot capture
+        self.logger.info(
+            f"\n{'='*60}\n"
+            f"║ AFTER SCREENSHOT CAPTURE:\n"
+            f"║   Viewport:     {self.current_viewport['width']}x{self.current_viewport['height']}\n"
+            f"║   Screenshot:   {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}\n"
+            f"║   Match: {'✓ YES' if self.current_viewport == self.actual_screenshot_size else '✗ NO - MISMATCH!'}\n"
+            f"{'='*60}",
+            category="agent",
+        )
 
         # _format_initial_messages already initializes self.history
         self._format_initial_messages(instruction, current_screenshot_b64)

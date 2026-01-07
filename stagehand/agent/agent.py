@@ -127,8 +127,8 @@ class Agent:
                 # This is important for GoogleCUAClient's coordinate normalization
                 if hasattr(self.client, "set_viewport"):
                     self.client.set_viewport(width, height)
-                    self.logger.debug(
-                        f"Updated client viewport from page: {width}x{height}",
+                    self.logger.info(
+                        f"Updated client viewport from window.innerWidth/Height: {width}x{height}",
                         category="agent",
                     )
                 # Fallback for clients that use display_width/display_height directly
