@@ -821,7 +821,8 @@ class BrowserUseCUAClient(AgentClient):
         Handles multiple action formats:
         1. Self-closing XML: <action type="click" selector="[2]"/>
         2. Content-based: <action>click [2]</action>
-        3. No tags: Action: type_text(2, "text") or just type [2] text
+        3. Wrapper tags: <action_sequence>, <action_set>, <execute_action>, etc.
+        4. No tags: Action: type_text(2, "text") or just type [2] text
 
         Args:
             completion: String like 'Reasoning...\n\n<action type="click" selector="[2]"/>'
@@ -854,22 +855,34 @@ class BrowserUseCUAClient(AgentClient):
             if action_dict:
                 actions.append(action_dict)
 
-        # Pattern 2: Content-based tags like <action>click [2]</action>
-        content_pattern = r'<action>(.*?)</action>'
+        # Pattern 2: Content-based tags - match various tag names used by the model
+        # Matches: <action>, <action_sequence>, <action_set>, <execute_action>, etc.
+        content_pattern = r'<(action|action_sequence|action_set|execute_action)>(.*?)</\1>'
         content_matches = re.findall(content_pattern, completion, re.DOTALL)
 
-        for content in content_matches:
+        for tag_name, content in content_matches:
             self.logger.info(
-                f"[DEBUG] Found content-based action tag: '{content}'",
+                f"[DEBUG] Found content-based action tag <{tag_name}>: '{content}'",
                 category=StagehandFunctionName.AGENT,
             )
-            # Content might have multiple actions, try to parse each
-            parsed_actions = self._parse_action_content(content.strip())
-            if parsed_actions:
-                if isinstance(parsed_actions, list):
-                    actions.extend(parsed_actions)
-                else:
-                    actions.append(parsed_actions)
+            # Check if content contains nested <action> tags
+            nested_actions = re.findall(r'<action>(.*?)</action>', content, re.DOTALL)
+            if nested_actions:
+                for nested_content in nested_actions:
+                    parsed_actions = self._parse_action_content(nested_content.strip())
+                    if parsed_actions:
+                        if isinstance(parsed_actions, list):
+                            actions.extend(parsed_actions)
+                        else:
+                            actions.append(parsed_actions)
+            else:
+                # Content might have multiple actions, try to parse each
+                parsed_actions = self._parse_action_content(content.strip())
+                if parsed_actions:
+                    if isinstance(parsed_actions, list):
+                        actions.extend(parsed_actions)
+                    else:
+                        actions.append(parsed_actions)
 
         # Pattern 3: No tags - try to parse the whole completion as an action
         # Look for patterns like "Action: type_text(...)" or "type [2] text"
@@ -1149,11 +1162,79 @@ class BrowserUseCUAClient(AgentClient):
             index = int(bare_index_match.group(1))
             return {"click_element": {"index": index}}
 
+        # click(index) - function call syntax for click
+        click_func_match = re.match(r"click\s*\(\s*(\d+)\s*\)", action_str, re.IGNORECASE)
+        if click_func_match:
+            index = int(click_func_match.group(1))
+            return {"click_element": {"index": index}}
+
         # click [index] or click index (with or without brackets)
         click_match = re.match(r"click\s*\[?(\d+)\]?", action_str, re.IGNORECASE)
         if click_match:
             index = int(click_match.group(1))
             return {"click_element": {"index": index}}
+
+        # type_text_in_element[index, text] - square bracket format with comma
+        type_in_element_match = re.match(
+            r'(?:type_text_in_element|type_in_element|input_in_element)\s*\[\s*(\d+)\s*,\s*([^\]]+)\]',
+            action_str, re.IGNORECASE
+        )
+        if type_in_element_match:
+            index = int(type_in_element_match.group(1))
+            text = self._sanitize_text_value(type_in_element_match.group(2).strip().strip('"\''))
+            return {"input_text": {"index": index, "text": text}}
+
+        # Nested XML format: <type>set_element_value</type> <element_selector>...</element_selector> <value>...</value>
+        nested_xml_type = re.search(r'<type>\s*(.*?)\s*</type>', action_str, re.IGNORECASE | re.DOTALL)
+        if nested_xml_type:
+            action_type = nested_xml_type.group(1).strip().lower()
+            if action_type in ('set_element_value', 'type', 'input', 'input_text'):
+                # Extract selector and value
+                selector_match = re.search(r'<(?:element_selector|selector)>\s*(.*?)\s*</(?:element_selector|selector)>', action_str, re.IGNORECASE | re.DOTALL)
+                value_match = re.search(r'<value>\s*(.*?)\s*</value>', action_str, re.IGNORECASE | re.DOTALL)
+                if value_match:
+                    text = self._sanitize_text_value(value_match.group(1).strip())
+                    if selector_match:
+                        selector = selector_match.group(1).strip()
+                        # Check if selector looks like an index
+                        index_check = re.match(r'^\[?(\d+)\]?$', selector)
+                        if index_check:
+                            return {"input_text": {"index": int(index_check.group(1)), "text": text}}
+                        else:
+                            return {"input_text": {"css_selector": selector, "text": text}}
+            elif action_type == 'click':
+                selector_match = re.search(r'<(?:element_selector|selector)>\s*(.*?)\s*</(?:element_selector|selector)>', action_str, re.IGNORECASE | re.DOTALL)
+                if selector_match:
+                    selector = selector_match.group(1).strip()
+                    index_check = re.match(r'^\[?(\d+)\]?$', selector)
+                    if index_check:
+                        return {"click_element": {"index": int(index_check.group(1))}}
+                    else:
+                        return {"click_element": {"css_selector": selector}}
+
+        # Key-value format: type: set_element_value element_selector: ... value: ...
+        kv_type_match = re.search(r'type:\s*set_element_value', action_str, re.IGNORECASE)
+        if kv_type_match:
+            selector_match = re.search(r'element_selector:\s*(\S+)', action_str, re.IGNORECASE)
+            value_match = re.search(r'value:\s*(.+?)(?:\s*$|\s+(?:element_selector|type):)', action_str, re.IGNORECASE)
+            if value_match:
+                text = self._sanitize_text_value(value_match.group(1).strip())
+                if selector_match:
+                    selector = selector_match.group(1).strip()
+                    return {"input_text": {"css_selector": selector, "text": text}}
+
+        # user_input/selector format: user_input='text', selector='...'
+        user_input_match = re.search(r"user_input\s*=\s*['\"]([^'\"]*)['\"]", action_str, re.IGNORECASE)
+        if user_input_match:
+            text = self._sanitize_text_value(user_input_match.group(1))
+            selector_match = re.search(r"selector\s*=\s*['\"]([^'\"]*)['\"]", action_str, re.IGNORECASE)
+            if selector_match:
+                selector = selector_match.group(1).strip()
+                index_check = re.match(r'^\[?(\d+)\]?$', selector)
+                if index_check:
+                    return {"input_text": {"index": int(index_check.group(1)), "text": text}}
+                else:
+                    return {"input_text": {"css_selector": selector, "text": text}}
 
         # input_text [index] text OR type [index] text OR input index text (with or without brackets)
         input_match = re.match(r"(?:input_text|type|input)\s*\[?(\d+)\]?\s*(.*)", action_str, re.IGNORECASE | re.DOTALL)
