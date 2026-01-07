@@ -110,18 +110,7 @@ class Agent:
         viewport_size may be None or incorrect.
         
         This matches the TypeScript SDK's updateClientViewport() behavior.
-        
-        Note: GoogleCUAClient uses a fixed 1000x1000 viewport to match Gemini's 0-1000
-        coordinate system, so we skip viewport updates for it.
         """
-        # Skip viewport updates for GoogleCUAClient - it requires fixed 1000x1000 viewport
-        if isinstance(self.client, GoogleCUAClient):
-            self.logger.debug(
-                "Skipping viewport update for GoogleCUAClient (uses fixed 1000x1000)",
-                category="agent",
-            )
-            return
-            
         try:
             page = self.stagehand.page._page
             # Evaluate window dimensions directly in the page (like TypeScript does)
@@ -134,8 +123,16 @@ class Agent:
                 height = dimensions["height"]
                 self.viewport = {"width": width, "height": height}
                 
-                # Update the client's display dimensions
-                if hasattr(self.client, "display_width"):
+                # Update the client's viewport dimensions using set_viewport if available
+                # This is important for GoogleCUAClient's coordinate normalization
+                if hasattr(self.client, "set_viewport"):
+                    self.client.set_viewport(width, height)
+                    self.logger.debug(
+                        f"Updated client viewport from page: {width}x{height}",
+                        category="agent",
+                    )
+                # Fallback for clients that use display_width/display_height directly
+                elif hasattr(self.client, "display_width"):
                     self.client.display_width = width
                     self.client.display_height = height
                     self.logger.debug(
@@ -188,42 +185,9 @@ class Agent:
                 category="agent",
             )
 
-            # For GoogleCUAClient, resize browser viewport to 1000x1000 to match Gemini's coordinate system
-            if isinstance(self.client, GoogleCUAClient):
-                try:
-                    page = self.stagehand.page._page
-                    
-                    # Log current viewport before resize
-                    current_viewport = page.viewport_size
-                    
-                    await page.set_viewport_size({"width": 1000, "height": 1000})
-                    
-                    # Log viewport after resize
-                    new_viewport = page.viewport_size
-                    
-                    # Also log actual window dimensions from the page
-                    dimensions = await page.evaluate(
-                        "({ width: window.innerWidth, height: window.innerHeight })"
-                    )
-                    
-                    self.logger.info(
-                        f"\n{'='*60}\n"
-                        f"║ GOOGLE CUA VIEWPORT RESIZE\n"
-                        f"║ Before resize:     {current_viewport}\n"
-                        f"║ After resize:      {new_viewport}\n"
-                        f"║ window.innerWidth: {dimensions.get('width')}\n"
-                        f"║ window.innerHeight:{dimensions.get('height')}\n"
-                        f"{'='*60}",
-                        category="agent",
-                    )
-                except Exception as e:
-                    self.logger.error(
-                        f"Failed to set viewport for GoogleCUAClient: {e}",
-                        category="agent",
-                    )
-
             # Update viewport from the actual browser window dimensions
             # This is crucial for Browserbase/CDP connections where viewport_size may be incorrect
+            # For GoogleCUAClient, this sets the viewport dimensions used for coordinate normalization
             await self._update_viewport_from_page()
 
             try:

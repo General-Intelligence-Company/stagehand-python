@@ -30,6 +30,11 @@ from .client import AgentClient
 load_dotenv()
 
 
+# Default viewport dimensions (matches TypeScript SDK)
+DEFAULT_VIEWPORT_WIDTH = 1288
+DEFAULT_VIEWPORT_HEIGHT = 711
+
+
 class GoogleCUAClient(AgentClient):
     def __init__(
         self,
@@ -56,15 +61,23 @@ class GoogleCUAClient(AgentClient):
 
         self.genai_client = genai.Client(api_key=api_key)
 
-        # Google Gemini CUA uses a 0-1000 coordinate system, so we force a 1000x1000 viewport
-        # to avoid coordinate transformation complexity
-        self.display_width = 1000
-        self.display_height = 1000
+        # Track viewport and screenshot dimensions for coordinate normalization
+        # Google Gemini CUA returns coordinates in a 0-1000 range that must be
+        # transformed to actual viewport coordinates
+        self.current_viewport = {
+            "width": viewport.get("width", DEFAULT_VIEWPORT_WIDTH) if viewport else DEFAULT_VIEWPORT_WIDTH,
+            "height": viewport.get("height", DEFAULT_VIEWPORT_HEIGHT) if viewport else DEFAULT_VIEWPORT_HEIGHT,
+        }
+        self.actual_screenshot_size = {
+            "width": self.current_viewport["width"],
+            "height": self.current_viewport["height"],
+        }
         
         self.logger.info(
             f"\n{'='*60}\n"
             f"║ GOOGLE CUA INIT\n"
-            f"║ Fixed display size: {self.display_width}x{self.display_height}\n"
+            f"║ Initial viewport: {self.current_viewport['width']}x{self.current_viewport['height']}\n"
+            f"║ Initial screenshot size: {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}\n"
             f"{'='*60}",
             category="agent",
         )
@@ -84,6 +97,40 @@ class GoogleCUAClient(AgentClient):
         )
 
         self.history: list[Content] = []
+
+    def set_viewport(self, width: int, height: int) -> None:
+        """Set the current viewport dimensions."""
+        self.current_viewport = {"width": width, "height": height}
+        self.logger.debug(
+            f"GoogleCUAClient viewport updated: {width}x{height}",
+            category="agent",
+        )
+
+    def set_screenshot_size(self, width: int, height: int) -> None:
+        """Set the actual screenshot dimensions (extracted from PNG)."""
+        self.actual_screenshot_size = {"width": width, "height": height}
+        self.logger.debug(
+            f"GoogleCUAClient screenshot size updated: {width}x{height}",
+            category="agent",
+        )
+
+    def _sync_screenshot_dimensions_from_handler(self) -> None:
+        """Sync screenshot dimensions from the CUA handler.
+        
+        The handler extracts dimensions from PNG headers when taking screenshots.
+        This method reads those dimensions and updates the client's tracking.
+        """
+        if self.handler is None:
+            return
+            
+        if (
+            self.handler.last_screenshot_width is not None
+            and self.handler.last_screenshot_height is not None
+        ):
+            self.set_screenshot_size(
+                self.handler.last_screenshot_width,
+                self.handler.last_screenshot_height,
+            )
 
     def format_screenshot(self, screenshot_base64: str) -> Part:
         """Formats a screenshot for the Gemini CUA model."""
@@ -112,24 +159,42 @@ class GoogleCUAClient(AgentClient):
         return self.history
 
     def _normalize_coordinates(self, x: int, y: int) -> tuple[int, int]:
-        """Clamp coordinates to valid 0-999 range.
+        """Normalize Google's 0-1000 coordinates to actual viewport coordinates.
         
-        Since we use a 1000x1000 viewport, Gemini's 0-1000 coordinates map directly to pixels.
+        Google Gemini CUA returns coordinates in a normalized 0-1000 range.
+        This method transforms them to actual viewport pixel coordinates by:
+        1. Clamping to valid 0-999 range
+        2. Converting from 0-1000 to screenshot pixel coordinates
+        3. Scaling from screenshot pixels to viewport pixels
+        
+        This matches the TypeScript SDK's normalizeCoordinates() implementation.
         """
-        norm_x = min(999, max(0, x))
-        norm_y = min(999, max(0, y))
+        # Clamp to valid range (0-999)
+        x = min(999, max(0, x))
+        y = min(999, max(0, y))
         
-        self.logger.info(
-            f"\n{'*'*60}\n"
-            f"* COORDINATE NORMALIZATION\n"
-            f"* Input from model:  x={x}, y={y}\n"
-            f"* Output normalized: x={norm_x}, y={norm_y}\n"
-            f"* Display size:      {self.display_width}x{self.display_height}\n"
-            f"{'*'*60}",
+        # Convert from 0-1000 range to screenshot pixel coordinates
+        screenshot_x = (x / 1000) * self.actual_screenshot_size["width"]
+        screenshot_y = (y / 1000) * self.actual_screenshot_size["height"]
+        
+        # Scale from screenshot coordinates to viewport coordinates
+        # This accounts for any devicePixelRatio differences
+        scale_x = self.current_viewport["width"] / self.actual_screenshot_size["width"]
+        scale_y = self.current_viewport["height"] / self.actual_screenshot_size["height"]
+        
+        final_x = int(screenshot_x * scale_x)
+        final_y = int(screenshot_y * scale_y)
+        
+        self.logger.debug(
+            f"Coordinate normalization: "
+            f"raw({x}, {y}) -> screenshot({screenshot_x:.1f}, {screenshot_y:.1f}) -> "
+            f"viewport({final_x}, {final_y}) "
+            f"[viewport: {self.current_viewport['width']}x{self.current_viewport['height']}, "
+            f"screenshot: {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}]",
             category="agent",
         )
         
-        return norm_x, norm_y
+        return final_x, final_y
 
     def _process_provider_response(
         self, response: types.GenerateContentResponse
@@ -521,6 +586,9 @@ class GoogleCUAClient(AgentClient):
         await self.handler.inject_cursor()
         current_screenshot_b64 = await self.handler.get_screenshot_base64()
         current_url = self.handler.page.url
+        
+        # Update screenshot dimensions from handler (extracted from PNG header)
+        self._sync_screenshot_dimensions_from_handler()
 
         # _format_initial_messages already initializes self.history
         self._format_initial_messages(instruction, current_screenshot_b64)
@@ -612,6 +680,8 @@ class GoogleCUAClient(AgentClient):
                         current_screenshot_b64 = (
                             await self.handler.get_screenshot_base64()
                         )
+                        # Update screenshot dimensions from handler after each screenshot
+                        self._sync_screenshot_dimensions_from_handler()
                         current_url = self.handler.page.url
 
                     if not invoked_function_name:
