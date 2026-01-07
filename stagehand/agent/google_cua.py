@@ -127,10 +127,21 @@ class GoogleCUAClient(AgentClient):
             self.handler.last_screenshot_width is not None
             and self.handler.last_screenshot_height is not None
         ):
-            self.set_screenshot_size(
-                self.handler.last_screenshot_width,
-                self.handler.last_screenshot_height,
-            )
+            screenshot_w = self.handler.last_screenshot_width
+            screenshot_h = self.handler.last_screenshot_height
+            
+            # Log if there's a mismatch between screenshot and viewport
+            if (screenshot_w != self.current_viewport["width"] or 
+                screenshot_h != self.current_viewport["height"]):
+                self.logger.warning(
+                    f"Screenshot/viewport mismatch detected! "
+                    f"Screenshot: {screenshot_w}x{screenshot_h}, "
+                    f"Viewport: {self.current_viewport['width']}x{self.current_viewport['height']}. "
+                    f"Coordinates will be scaled accordingly.",
+                    category="agent",
+                )
+            
+            self.set_screenshot_size(screenshot_w, screenshot_h)
 
     def format_screenshot(self, screenshot_base64: str) -> Part:
         """Formats a screenshot for the Gemini CUA model."""
@@ -158,47 +169,37 @@ class GoogleCUAClient(AgentClient):
         self.history = [initial_content]  # Start history with the first user message
         return self.history
 
-    def _normalize_coordinates(self, gemini_x: int, gemini_y: int) -> tuple[int, int]:
-        """Normalize Google's 0-1000 coordinates to actual viewport coordinates.
+    def _normalize_coordinates(self, x: int, y: int) -> tuple[int, int]:
+        """Normalize Google's 0-999 coordinates to actual viewport coordinates.
         
-        IMPORTANT: Gemini returns coordinates in (y, x) order (row, column) but labels
-        them as "x" and "y". This means gemini's "x" is actually the vertical position
-        and gemini's "y" is actually the horizontal position. We swap them here to
-        convert to standard (x, y) Cartesian coordinates for Playwright/Browserbase.
+        Google Gemini CUA works in a NORMALIZED coordinate space (0-999), treating
+        the screen as a virtual 1000x1000 grid regardless of actual dimensions.
         
-        This method transforms coordinates by:
-        1. Swapping axes (gemini uses y,x internally but labels as x,y)
-        2. Clamping to valid 0-999 range
-        3. Converting from 0-1000 to screenshot pixel coordinates
-        4. Scaling from screenshot pixels to viewport pixels
+        This method converts from normalized 0-999 space directly to viewport pixels:
+        - final_x = (normalized_x / 1000) * viewport_width
+        - final_y = (normalized_y / 1000) * viewport_height
+        
+        The screenshot dimensions are irrelevant - Gemini always works in normalized space.
         """
-        # Swap coordinates: Gemini's "x" is actually y (row), "y" is actually x (column)
-        raw_x = gemini_y  # Gemini's y is the horizontal position (actual x)
-        raw_y = gemini_x  # Gemini's x is the vertical position (actual y)
+        raw_x, raw_y = x, y
         
         # Clamp to valid range (0-999)
-        x = min(999, max(0, raw_x))
-        y = min(999, max(0, raw_y))
+        x = min(999, max(0, x))
+        y = min(999, max(0, y))
         
-        # Convert from 0-1000 range to screenshot pixel coordinates
-        screenshot_x = (x / 1000) * self.actual_screenshot_size["width"]
-        screenshot_y = (y / 1000) * self.actual_screenshot_size["height"]
+        # Convert directly from normalized 0-999 space to viewport pixels
+        # Gemini treats the screen as 1000x1000 regardless of actual size
+        final_x = int((x / 1000) * self.current_viewport["width"])
+        final_y = int((y / 1000) * self.current_viewport["height"])
         
-        # Scale from screenshot coordinates to viewport coordinates
-        # This accounts for any devicePixelRatio differences
-        scale_x = self.current_viewport["width"] / self.actual_screenshot_size["width"]
-        scale_y = self.current_viewport["height"] / self.actual_screenshot_size["height"]
-        
-        final_x = int(screenshot_x * scale_x)
-        final_y = int(screenshot_y * scale_y)
-        
-        self.logger.debug(
-            f"Coordinate normalization: "
-            f"gemini({gemini_x}, {gemini_y}) -> swapped({raw_x}, {raw_y}) -> "
-            f"screenshot({screenshot_x:.1f}, {screenshot_y:.1f}) -> "
-            f"viewport({final_x}, {final_y}) "
-            f"[viewport: {self.current_viewport['width']}x{self.current_viewport['height']}, "
-            f"screenshot: {self.actual_screenshot_size['width']}x{self.actual_screenshot_size['height']}]",
+        self.logger.info(
+            f"\n{'='*60}\n"
+            f"║ COORDINATE NORMALIZATION\n"
+            f"║ Gemini normalized (0-999): x={raw_x}, y={raw_y}\n"
+            f"║ After clamp (0-999):       x={x}, y={y}\n"
+            f"║ Viewport size:             {self.current_viewport['width']}x{self.current_viewport['height']}\n"
+            f"║ Final viewport pixels:     x={final_x}, y={final_y}\n"
+            f"{'='*60}",
             category="agent",
         )
         
