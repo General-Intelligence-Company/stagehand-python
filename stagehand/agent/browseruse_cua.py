@@ -646,9 +646,10 @@ class BrowserUseCUAClient(AgentClient):
     def _parse_completion_string(self, completion: str) -> tuple[Optional[str], list[dict[str, Any]]]:
         """Parse the completion string to extract reasoning and actions.
 
-        Handles two action formats:
+        Handles multiple action formats:
         1. Self-closing XML: <action type="click" selector="[2]"/>
         2. Content-based: <action>click [2]</action>
+        3. No tags: Action: type_text(2, "text") or just type [2] text
 
         Args:
             completion: String like 'Reasoning...\n\n<action type="click" selector="[2]"/>'
@@ -690,9 +691,28 @@ class BrowserUseCUAClient(AgentClient):
                 f"[DEBUG] Found content-based action tag: '{content}'",
                 category=StagehandFunctionName.AGENT,
             )
-            action_dict = self._parse_action_content(content.strip())
-            if action_dict:
-                actions.append(action_dict)
+            # Content might have multiple actions, try to parse each
+            parsed_actions = self._parse_action_content(content.strip())
+            if parsed_actions:
+                if isinstance(parsed_actions, list):
+                    actions.extend(parsed_actions)
+                else:
+                    actions.append(parsed_actions)
+
+        # Pattern 3: No tags - try to parse the whole completion as an action
+        # Look for patterns like "Action: type_text(...)" or "type [2] text"
+        if not actions:
+            # Try parsing the completion directly (strip "Action:" prefix if present)
+            action_str = completion.strip()
+            if action_str.lower().startswith("action:"):
+                action_str = action_str[7:].strip()
+
+            parsed_actions = self._parse_action_content(action_str)
+            if parsed_actions:
+                if isinstance(parsed_actions, list):
+                    actions.extend(parsed_actions)
+                else:
+                    actions.append(parsed_actions)
 
         # Extract reasoning (everything before the first <action tag)
         first_action_pos = completion.find("<action")
@@ -701,8 +721,8 @@ class BrowserUseCUAClient(AgentClient):
         elif first_action_pos == 0:
             reasoning = None
         else:
-            # No action tags found
-            reasoning = completion.strip() if completion.strip() else None
+            # No action tags found - if we parsed actions, reasoning is None
+            reasoning = None if actions else (completion.strip() if completion.strip() else None)
 
         self.logger.info(
             f"[DEBUG] Parsed {len(actions)} actions, reasoning: {reasoning[:100] if reasoning else None}...",
@@ -877,23 +897,25 @@ class BrowserUseCUAClient(AgentClient):
         )
         return None
 
-    def _parse_action_content(self, action_str: str) -> Optional[dict[str, Any]]:
+    def _parse_action_content(self, action_str: str) -> Optional[dict[str, Any] | list[dict[str, Any]]]:
         """Parse an action string from content-based tags.
 
         Supported formats:
             - "click [2]" -> {"click_element": {"index": 2}}
             - "input_text [3] hello world" -> {"input_text": {"index": 3, "text": "hello world"}}
+            - "type_text(2, \"hello\")" -> {"input_text": {"index": 2, "text": "hello"}}
+            - "type: hello, 2" -> {"input_text": {"index": 2, "text": "hello"}}
+            - "type hello into input[name=foo]" -> {"input_text": {"css_selector": "input[name=foo]", "text": "hello"}}
+            - "type_text #selector text" -> {"input_text": {"css_selector": "#selector", "text": "text"}}
             - "scroll down" -> {"scroll": {"down": True}}
-            - "scroll up" -> {"scroll": {"down": False}}
             - "done task completed" -> {"done": {"text": "task completed"}}
-            - "go_back" -> {"go_back": {}}
-            - "navigate https://..." -> {"navigate": {"url": "https://..."}}
+            - Multiple actions: "type_text #id text click [7]" -> list of action dicts
 
         Args:
             action_str: The action string from inside <action>...</action> tags
 
         Returns:
-            Action data dict or None if parsing fails
+            Action data dict, list of action dicts, or None if parsing fails
         """
         import re
 
@@ -916,6 +938,76 @@ class BrowserUseCUAClient(AgentClient):
             index = int(input_match.group(1))
             text = input_match.group(2).strip().strip('"\'')
             return {"input_text": {"index": index, "text": text}}
+
+        # Function call syntax: type_text(index, "text") or type("index", "text")
+        func_call_match = re.match(
+            r'(?:type_text|type|input_text)\s*\(\s*["\']?(\d+|\[\d+\])["\']?\s*,\s*["\']([^"\']*)["\']',
+            action_str, re.IGNORECASE
+        )
+        if func_call_match:
+            index_str = func_call_match.group(1)
+            # Handle [2] or just 2
+            index = int(re.search(r'\d+', index_str).group())
+            text = func_call_match.group(2)
+            return {"input_text": {"index": index, "text": text}}
+
+        # Colon format: type: text, index OR type: text, selector
+        colon_match = re.match(
+            r'(?:type_text|type|input_text)\s*:\s*([^,]+),\s*(.+)',
+            action_str, re.IGNORECASE
+        )
+        if colon_match:
+            text = colon_match.group(1).strip().strip('"\'')
+            target = colon_match.group(2).strip().strip('"\'')
+            # Check if target is an index
+            if target.isdigit():
+                return {"input_text": {"index": int(target), "text": text}}
+            elif re.match(r'^\[\d+\]$', target):
+                index = int(re.search(r'\d+', target).group())
+                return {"input_text": {"index": index, "text": text}}
+            else:
+                # CSS selector or description - use as css_selector
+                return {"input_text": {"css_selector": target, "text": text}}
+
+        # "into" format: type text into selector
+        into_match = re.match(
+            r'(?:type_text|type|input_text)\s+(.+?)\s+into\s+(.+)',
+            action_str, re.IGNORECASE
+        )
+        if into_match:
+            text = into_match.group(1).strip().strip('"\'')
+            selector = into_match.group(2).strip().strip('"\'')
+            # Check if selector is an index
+            if re.match(r'^\[\d+\]$', selector):
+                index = int(re.search(r'\d+', selector).group())
+                return {"input_text": {"index": index, "text": text}}
+            else:
+                return {"input_text": {"css_selector": selector, "text": text}}
+
+        # type_text #selector text OR type_text selector text (CSS selector with space-separated text)
+        css_type_match = re.match(
+            r'(?:type_text|input_text)\s+(#[\w-]+|\.[\w-]+|\[[\w\-=\'"]+\])\s+(.*)',
+            action_str, re.IGNORECASE | re.DOTALL
+        )
+        if css_type_match:
+            selector = css_type_match.group(1).strip()
+            text = css_type_match.group(2).strip().strip('"\'')
+            return {"input_text": {"css_selector": selector, "text": text}}
+
+        # Check for multiple actions in one string (e.g., "type_text #id text click [7]")
+        # Look for action keywords and try to split
+        multi_action_pattern = r'\b(click|type_text|type|input_text|scroll|done|go_back|navigate)\b'
+        action_starts = [(m.start(), m.group(1)) for m in re.finditer(multi_action_pattern, action_str, re.IGNORECASE)]
+        if len(action_starts) > 1:
+            actions = []
+            for i, (start, action_type) in enumerate(action_starts):
+                end = action_starts[i + 1][0] if i + 1 < len(action_starts) else len(action_str)
+                sub_action_str = action_str[start:end].strip()
+                sub_action = self._parse_action_content(sub_action_str)
+                if sub_action and not isinstance(sub_action, list):
+                    actions.append(sub_action)
+            if actions:
+                return actions
 
         # scroll down/up
         scroll_match = re.match(r"scroll\s*(down|up)(?:\s+(\d+))?", action_str, re.IGNORECASE)
