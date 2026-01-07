@@ -1,11 +1,33 @@
 import asyncio
 import base64
+import struct
 from typing import Any, Optional
 
 from ..types.agent import (
     ActionExecutionResult,
     AgentAction,
 )
+
+
+def get_png_dimensions(png_bytes: bytes) -> tuple[int, int]:
+    """Extract width and height from PNG file bytes.
+    
+    PNG format: First 8 bytes are signature, then IHDR chunk contains dimensions.
+    IHDR chunk: 4 bytes length + 4 bytes 'IHDR' + 4 bytes width + 4 bytes height
+    Width is at bytes 16-20, height at bytes 20-24 (big-endian).
+    """
+    if len(png_bytes) < 24:
+        raise ValueError("Invalid PNG: too short")
+    
+    # Check PNG signature
+    if png_bytes[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError("Invalid PNG: bad signature")
+    
+    # Read width and height from IHDR chunk (big-endian)
+    width = struct.unpack('>I', png_bytes[16:20])[0]
+    height = struct.unpack('>I', png_bytes[20:24])[0]
+    
+    return width, height
 
 
 class StagehandFunctionName:
@@ -24,13 +46,36 @@ class CUAHandler:  # Computer Use Agent Handler
         self.stagehand = stagehand
         self.logger = logger
         self.page = page
+        
+        # Track the last screenshot dimensions (updated on each screenshot)
+        self.last_screenshot_width: Optional[int] = None
+        self.last_screenshot_height: Optional[int] = None
 
     async def get_screenshot_base64(self) -> str:
-        """Captures a screenshot of the current page and returns it as a base64 encoded string."""
+        """Captures a screenshot of the current page and returns it as a base64 encoded string.
+        
+        Also extracts and stores the screenshot dimensions for coordinate normalization.
+        """
         self.logger.debug(
             "Capturing screenshot for CUA client", category=StagehandFunctionName.AGENT
         )
         screenshot_bytes = await self.page.screenshot(full_page=False, type="png")
+        
+        # Extract and store screenshot dimensions
+        try:
+            width, height = get_png_dimensions(screenshot_bytes)
+            self.last_screenshot_width = width
+            self.last_screenshot_height = height
+            self.logger.debug(
+                f"Screenshot dimensions: {width}x{height}",
+                category=StagehandFunctionName.AGENT
+            )
+        except Exception as e:
+            self.logger.debug(
+                f"Could not extract screenshot dimensions: {e}",
+                category=StagehandFunctionName.AGENT
+            )
+        
         return base64.b64encode(screenshot_bytes).decode()
 
     async def perform_action(self, action: AgentAction) -> ActionExecutionResult:

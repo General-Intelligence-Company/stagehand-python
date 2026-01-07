@@ -69,6 +69,10 @@ class GoogleCUAClient(AgentClient):
 
         self.display_width = dimensions[0]
         self.display_height = dimensions[1]
+        
+        # Track actual screenshot dimensions separately (may differ due to device pixel ratio)
+        self.actual_screenshot_width = dimensions[0]
+        self.actual_screenshot_height = dimensions[1]
 
         self._generate_content_config = GenerateContentConfig(
             temperature=1,
@@ -112,10 +116,39 @@ class GoogleCUAClient(AgentClient):
         self.history = [initial_content]  # Start history with the first user message
         return self.history
 
+    def set_screenshot_size(self, width: int, height: int) -> None:
+        """Set the actual screenshot dimensions (may differ from viewport due to device pixel ratio)."""
+        self.actual_screenshot_width = width
+        self.actual_screenshot_height = height
+
+    def _update_screenshot_size_from_handler(self) -> None:
+        """Update screenshot size from the handler's last captured screenshot dimensions."""
+        if self.handler and self.handler.last_screenshot_width and self.handler.last_screenshot_height:
+            self.set_screenshot_size(
+                self.handler.last_screenshot_width,
+                self.handler.last_screenshot_height
+            )
+
     def _normalize_coordinates(self, x: int, y: int) -> tuple[int, int]:
-        """Normalizes coordinates from 0-1000 range to actual display dimensions."""
-        norm_x = int(x / 1000 * self.display_width)
-        norm_y = int(y / 1000 * self.display_height)
+        """Normalizes coordinates from 0-1000 range to actual viewport dimensions.
+        
+        Accounts for the difference between screenshot size and viewport size,
+        which can differ due to device pixel ratio (e.g., 2x on Browserbase/Retina displays).
+        """
+        # Clamp to valid range
+        x = min(999, max(0, x))
+        y = min(999, max(0, y))
+        
+        # First, map from 0-1000 to screenshot coordinates
+        screenshot_x = (x / 1000) * self.actual_screenshot_width
+        screenshot_y = (y / 1000) * self.actual_screenshot_height
+        
+        # Then scale from screenshot coordinates to viewport coordinates
+        scale_x = self.display_width / self.actual_screenshot_width
+        scale_y = self.display_height / self.actual_screenshot_height
+        
+        norm_x = int(screenshot_x * scale_x)
+        norm_y = int(screenshot_y * scale_y)
         return norm_x, norm_y
 
     def _process_provider_response(
@@ -473,6 +506,7 @@ class GoogleCUAClient(AgentClient):
 
         await self.handler.inject_cursor()
         current_screenshot_b64 = await self.handler.get_screenshot_base64()
+        self._update_screenshot_size_from_handler()
         current_url = self.handler.page.url
 
         # _format_initial_messages already initializes self.history
@@ -565,6 +599,7 @@ class GoogleCUAClient(AgentClient):
                         current_screenshot_b64 = (
                             await self.handler.get_screenshot_base64()
                         )
+                        self._update_screenshot_size_from_handler()
                         current_url = self.handler.page.url
 
                     if not invoked_function_name:
