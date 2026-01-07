@@ -110,7 +110,18 @@ class Agent:
         viewport_size may be None or incorrect.
         
         This matches the TypeScript SDK's updateClientViewport() behavior.
+        
+        Note: GoogleCUAClient uses a fixed 1000x1000 viewport to match Gemini's 0-1000
+        coordinate system, so we skip viewport updates for it.
         """
+        # Skip viewport updates for GoogleCUAClient - it requires fixed 1000x1000 viewport
+        if isinstance(self.client, GoogleCUAClient):
+            self.logger.debug(
+                "Skipping viewport update for GoogleCUAClient (uses fixed 1000x1000)",
+                category="agent",
+            )
+            return
+            
         try:
             page = self.stagehand.page._page
             # Evaluate window dimensions directly in the page (like TypeScript does)
@@ -176,6 +187,21 @@ class Agent:
                 f"Agent starting execution for instruction: '{instruction}'",
                 category="agent",
             )
+
+            # For GoogleCUAClient, resize browser viewport to 1000x1000 to match Gemini's coordinate system
+            if isinstance(self.client, GoogleCUAClient):
+                try:
+                    page = self.stagehand.page._page
+                    await page.set_viewport_size({"width": 1000, "height": 1000})
+                    self.logger.debug(
+                        "Set browser viewport to 1000x1000 for GoogleCUAClient",
+                        category="agent",
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to set viewport for GoogleCUAClient: {e}",
+                        category="agent",
+                    )
 
             # Update viewport from the actual browser window dimensions
             # This is crucial for Browserbase/CDP connections where viewport_size may be incorrect
