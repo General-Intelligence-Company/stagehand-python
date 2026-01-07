@@ -56,23 +56,10 @@ class GoogleCUAClient(AgentClient):
 
         self.genai_client = genai.Client(api_key=api_key)
 
-        # Match OpenAI pattern for viewport handling
-        dimensions = (
-            (viewport["width"], viewport["height"]) if viewport else (1288, 711)
-        )
-        if (
-            self.config
-            and hasattr(self.config, "display_width")
-            and hasattr(self.config, "display_height")
-        ):
-            dimensions = [self.config.display_width, self.config.display_height]
-
-        self.display_width = dimensions[0]
-        self.display_height = dimensions[1]
-        
-        # Track actual screenshot dimensions separately (may differ due to device pixel ratio)
-        self.actual_screenshot_width = dimensions[0]
-        self.actual_screenshot_height = dimensions[1]
+        # Google Gemini CUA uses a 0-1000 coordinate system, so we force a 1000x1000 viewport
+        # to avoid coordinate transformation complexity
+        self.display_width = 1000
+        self.display_height = 1000
 
         self._generate_content_config = GenerateContentConfig(
             temperature=1,
@@ -116,40 +103,12 @@ class GoogleCUAClient(AgentClient):
         self.history = [initial_content]  # Start history with the first user message
         return self.history
 
-    def set_screenshot_size(self, width: int, height: int) -> None:
-        """Set the actual screenshot dimensions (may differ from viewport due to device pixel ratio)."""
-        self.actual_screenshot_width = width
-        self.actual_screenshot_height = height
-
-    def _update_screenshot_size_from_handler(self) -> None:
-        """Update screenshot size from the handler's last captured screenshot dimensions."""
-        if self.handler and self.handler.last_screenshot_width and self.handler.last_screenshot_height:
-            self.set_screenshot_size(
-                self.handler.last_screenshot_width,
-                self.handler.last_screenshot_height
-            )
-
     def _normalize_coordinates(self, x: int, y: int) -> tuple[int, int]:
-        """Normalizes coordinates from 0-1000 range to actual viewport dimensions.
+        """Clamp coordinates to valid 0-999 range.
         
-        Accounts for the difference between screenshot size and viewport size,
-        which can differ due to device pixel ratio (e.g., 2x on Browserbase/Retina displays).
+        Since we use a 1000x1000 viewport, Gemini's 0-1000 coordinates map directly to pixels.
         """
-        # Clamp to valid range
-        x = min(999, max(0, x))
-        y = min(999, max(0, y))
-        
-        # First, map from 0-1000 to screenshot coordinates
-        screenshot_x = (x / 1000) * self.actual_screenshot_width
-        screenshot_y = (y / 1000) * self.actual_screenshot_height
-        
-        # Then scale from screenshot coordinates to viewport coordinates
-        scale_x = self.display_width / self.actual_screenshot_width
-        scale_y = self.display_height / self.actual_screenshot_height
-        
-        norm_x = int(screenshot_x * scale_x)
-        norm_y = int(screenshot_y * scale_y)
-        return norm_x, norm_y
+        return min(999, max(0, x)), min(999, max(0, y))
 
     def _process_provider_response(
         self, response: types.GenerateContentResponse
@@ -506,7 +465,6 @@ class GoogleCUAClient(AgentClient):
 
         await self.handler.inject_cursor()
         current_screenshot_b64 = await self.handler.get_screenshot_base64()
-        self._update_screenshot_size_from_handler()
         current_url = self.handler.page.url
 
         # _format_initial_messages already initializes self.history
@@ -599,7 +557,6 @@ class GoogleCUAClient(AgentClient):
                         current_screenshot_b64 = (
                             await self.handler.get_screenshot_base64()
                         )
-                        self._update_screenshot_size_from_handler()
                         current_url = self.handler.page.url
 
                     if not invoked_function_name:
