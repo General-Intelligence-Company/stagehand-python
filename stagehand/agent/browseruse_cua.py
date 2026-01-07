@@ -545,13 +545,13 @@ class BrowserUseCUAClient(AgentClient):
         feedback_content = []
 
         # Add action result
-        if action_result.get("success", False):
+        if action_result.success:
             feedback_content.append({
                 "type": "text",
                 "text": "Action executed successfully.",
             })
         else:
-            error = action_result.get("error", "Unknown error")
+            error = action_result.error or "Unknown error"
             feedback_content.append({
                 "type": "text",
                 "text": f"Action failed: {error}",
