@@ -322,7 +322,7 @@ class BrowserUseCUAClient(AgentClient):
                 reasoning,
                 is_done,
                 done_message,
-            ) = self._process_provider_response(response)
+            ) = await self._process_provider_response(response)
 
             self.logger.info(
                 f"[DEBUG] Processed response - actions: {len(agent_actions)}, reasoning: {reasoning is not None}, is_done: {is_done}",
@@ -477,7 +477,7 @@ class BrowserUseCUAClient(AgentClient):
 
         return messages
 
-    def _process_provider_response(
+    async def _process_provider_response(
         self, response: dict[str, Any]
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process browser-use API response.
@@ -522,11 +522,11 @@ class BrowserUseCUAClient(AgentClient):
 
         # Handle structured dict response (when output_format is provided)
         if isinstance(completion, dict):
-            return self._process_structured_completion(completion)
+            return await self._process_structured_completion(completion)
 
         # Fallback: Handle string response with XML tags (when output_format is not used)
         if isinstance(completion, str):
-            return self._process_string_completion(completion)
+            return await self._process_string_completion(completion)
 
         self.logger.error(
             f"[DEBUG] completion is neither dict nor string! Type: {type(completion).__name__}",
@@ -534,7 +534,7 @@ class BrowserUseCUAClient(AgentClient):
         )
         return [], None, False, None
 
-    def _process_structured_completion(
+    async def _process_structured_completion(
         self, completion: dict[str, Any]
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process structured completion dict from browser-use API."""
@@ -591,13 +591,13 @@ class BrowserUseCUAClient(AgentClient):
                 continue
 
             # Convert to AgentAction
-            agent_action = self._convert_action(action_data)
+            agent_action = await self._convert_action(action_data)
             if agent_action:
                 agent_actions.append(agent_action)
 
         return agent_actions, reasoning, is_done, done_message
 
-    def _process_string_completion(
+    async def _process_string_completion(
         self, completion: str
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process string completion with XML action tags (fallback mode)."""
@@ -638,7 +638,7 @@ class BrowserUseCUAClient(AgentClient):
                 continue
 
             # Convert to AgentAction
-            agent_action = self._convert_action(action_data)
+            agent_action = await self._convert_action(action_data)
             if agent_action:
                 agent_actions.append(agent_action)
 
@@ -731,8 +731,12 @@ class BrowserUseCUAClient(AgentClient):
         )
 
         # Extract all attribute key="value" pairs
-        attr_pattern = r'(\w+)\s*=\s*["\']([^"\']*)["\']'
-        attrs = dict(re.findall(attr_pattern, attrs_str))
+        # Handle double-quoted and single-quoted attributes separately
+        # to properly support nested quotes like selector="[id='foo']"
+        double_quoted = re.findall(r'(\w+)\s*=\s*"([^"]*)"', attrs_str)
+        single_quoted = re.findall(r"(\w+)\s*=\s*'([^']*)'", attrs_str)
+        attrs = dict(double_quoted)
+        attrs.update(dict(single_quoted))
 
         self.logger.info(
             f"[DEBUG] Extracted attributes: {attrs}",
@@ -741,24 +745,49 @@ class BrowserUseCUAClient(AgentClient):
 
         action_type = attrs.get("type", "").lower()
 
-        if action_type == "click":
-            # selector="[2]" -> extract index 2
+        # Helper to extract index from selector or index attribute
+        def get_index_from_attrs(attrs: dict) -> Optional[int]:
+            # First check for explicit index attribute
+            if "index" in attrs:
+                try:
+                    return int(attrs["index"])
+                except ValueError:
+                    pass
+
+            # Then check selector for [digit] pattern (e.g., "[2]" or "2")
             selector = attrs.get("selector", "")
-            index_match = re.search(r'\[(\d+)\]', selector)
+
+            # Try to match [digit] pattern
+            index_match = re.search(r'^\[(\d+)\]$', selector)
             if index_match:
-                index = int(index_match.group(1))
-                return {"click_element": {"index": index}}
+                return int(index_match.group(1))
+
             # Maybe selector is just a number
             if selector.isdigit():
-                return {"click_element": {"index": int(selector)}}
+                return int(selector)
+
+            return None
+
+        if action_type == "click":
+            index = get_index_from_attrs(attrs)
+            selector = attrs.get("selector", "")
+
+            if index is not None:
+                return {"click_element": {"index": index}}
+            elif selector:
+                # CSS selector - pass it through for handling
+                return {"click_element": {"css_selector": selector}}
 
         elif action_type in ("input_text", "type", "input"):
+            index = get_index_from_attrs(attrs)
             selector = attrs.get("selector", "")
             text = attrs.get("text", attrs.get("value", ""))
-            index_match = re.search(r'\[(\d+)\]', selector)
-            if index_match:
-                index = int(index_match.group(1))
+
+            if index is not None:
                 return {"input_text": {"index": index, "text": text}}
+            elif selector:
+                # CSS selector - pass it through for handling
+                return {"input_text": {"css_selector": selector, "text": text}}
 
         elif action_type == "scroll":
             direction = attrs.get("direction", "down").lower()
@@ -978,7 +1007,7 @@ class BrowserUseCUAClient(AgentClient):
         )
         return None
 
-    def _convert_action(self, action_data: dict[str, Any]) -> Optional[AgentAction]:
+    async def _convert_action(self, action_data: dict[str, Any]) -> Optional[AgentAction]:
         """Convert a browser-use action to AgentAction."""
         try:
             # Determine action type
@@ -1000,10 +1029,10 @@ class BrowserUseCUAClient(AgentClient):
                     break
 
             if not action_type:
-                self.logger.warning(f"Unknown action format: {action_data}")
+                self.logger.info(f"[DEBUG] Unknown action format: {action_data}")
                 return None
 
-            action_payload = self._map_action_to_stagehand(action_type, action_params)
+            action_payload = await self._map_action_to_stagehand(action_type, action_params)
             if not action_payload:
                 return None
 
@@ -1022,14 +1051,15 @@ class BrowserUseCUAClient(AgentClient):
             self.logger.error(f"Failed to convert action: {e}")
             return None
 
-    def _map_action_to_stagehand(
+    async def _map_action_to_stagehand(
         self, action_type: str, params: dict[str, Any]
     ) -> Optional[dict[str, Any]]:
         """Map browser-use action to stagehand action format."""
 
         if action_type == "click_element":
-            # Get coordinates from index or direct coordinates
+            # Get coordinates from index, CSS selector, or direct coordinates
             index = params.get("index")
+            css_selector = params.get("css_selector")
             coord_x = params.get("coordinate_x")
             coord_y = params.get("coordinate_y")
 
@@ -1042,6 +1072,24 @@ class BrowserUseCUAClient(AgentClient):
                         "y": coords[1],
                         "button": "left",
                     }
+            elif css_selector and self.handler and self.handler.page:
+                # Use Playwright to find element by CSS selector
+                try:
+                    element = await self.handler.page.query_selector(css_selector)
+                    if element:
+                        box = await element.bounding_box()
+                        if box:
+                            # Click center of element
+                            x = int(box["x"] + box["width"] / 2)
+                            y = int(box["y"] + box["height"] / 2)
+                            return {
+                                "type": "click",
+                                "x": x,
+                                "y": y,
+                                "button": "left",
+                            }
+                except Exception as e:
+                    self.logger.info(f"[DEBUG] Failed to find element by CSS selector '{css_selector}': {e}")
             elif coord_x is not None and coord_y is not None:
                 return {
                     "type": "click",
@@ -1050,11 +1098,12 @@ class BrowserUseCUAClient(AgentClient):
                     "button": "left",
                 }
 
-            self.logger.warning(f"Could not resolve click coordinates for: {params}")
+            self.logger.info(f"[DEBUG] Could not resolve click coordinates for: {params}")
             return None
 
         elif action_type == "input_text":
             index = params.get("index")
+            css_selector = params.get("css_selector")
             text = params.get("text", "")
 
             # Get coordinates for the input element
@@ -1063,6 +1112,17 @@ class BrowserUseCUAClient(AgentClient):
                 coords = self._current_dom_state.get_coordinates_for_index(index)
                 if coords:
                     x, y = coords
+            elif css_selector and self.handler and self.handler.page:
+                # Use Playwright to find element by CSS selector
+                try:
+                    element = await self.handler.page.query_selector(css_selector)
+                    if element:
+                        box = await element.bounding_box()
+                        if box:
+                            x = int(box["x"] + box["width"] / 2)
+                            y = int(box["y"] + box["height"] / 2)
+                except Exception as e:
+                    self.logger.info(f"[DEBUG] Failed to find element by CSS selector '{css_selector}': {e}")
 
             return {
                 "type": "type",
