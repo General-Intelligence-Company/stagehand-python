@@ -650,15 +650,6 @@ class StagehandLogger:
         """Log a debug message (level 2)"""
         self.log(message, level=2, category=category, auxiliary=auxiliary)
 
-    def warning(
-        self, message: str, category: str = None, auxiliary: dict[str, Any] = None
-    ):
-        """Log a warning message (level 1, same as info)"""
-        self.log(message, level=1, category=category, auxiliary=auxiliary)
-
-    # Alias for warning
-    warn = warning
-
 
 def sync_log_handler(log_data: dict[str, Any]) -> None:
     """
