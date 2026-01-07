@@ -410,12 +410,11 @@ class BrowserUseCUAClient(AgentClient):
                     messages.extend(feedback)
 
             else:
-                # No actions returned
+                # No actions returned - continue loop, only exit on explicit done
                 self.logger.info(
-                    "Model did not return any actions. Ending task.",
+                    "Model did not return any actions. Continuing to wait for done signal.",
                     category=StagehandFunctionName.AGENT,
                 )
-                break
 
         self.logger.info(
             f"[DEBUG] run_task completing. completed={task_completed}, actions={len(actions_taken)}",
