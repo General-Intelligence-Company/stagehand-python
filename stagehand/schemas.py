@@ -236,6 +236,7 @@ class AgentProvider(str, Enum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     GOOGLE = "google"
+    BROWSER_USE = "browser_use"
 
 
 class AgentConfig(StagehandBaseModel):
