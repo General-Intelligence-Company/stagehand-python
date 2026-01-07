@@ -10,7 +10,7 @@ import random
 from typing import Any, Optional
 
 import httpx
-from pydantic import TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from ..dom.service import DomService
 from ..dom.views import DEFAULT_INCLUDE_ATTRIBUTES, DOMState
@@ -27,6 +27,31 @@ from ..types.agent import (
     Point,
 )
 from .client import AgentClient
+
+
+# Output format schema for browser-use API (matches browser-use's AgentOutput)
+class BrowserUseActionModel(BaseModel):
+    """Dynamic action model - one of these will be set."""
+    click_element: Optional[dict[str, Any]] = Field(default=None, description="Click an element by index")
+    input_text: Optional[dict[str, Any]] = Field(default=None, description="Type text into an element")
+    scroll: Optional[dict[str, Any]] = Field(default=None, description="Scroll the page")
+    navigate: Optional[dict[str, Any]] = Field(default=None, description="Navigate to a URL")
+    go_back: Optional[dict[str, Any]] = Field(default=None, description="Go back in browser history")
+    send_keys: Optional[dict[str, Any]] = Field(default=None, description="Send keyboard keys")
+    done: Optional[dict[str, Any]] = Field(default=None, description="Mark task as done")
+
+
+class BrowserUseAgentOutput(BaseModel):
+    """Output format for browser-use API responses."""
+    thinking: Optional[str] = Field(default=None, description="Model's internal reasoning")
+    evaluation_previous_goal: Optional[str] = Field(default=None, description="Evaluation of previous goal")
+    memory: Optional[str] = Field(default=None, description="What to remember")
+    next_goal: Optional[str] = Field(default=None, description="Next goal to achieve")
+    action: list[dict[str, Any]] = Field(
+        ...,
+        description="List of actions to execute",
+        min_length=1
+    )
 
 # HTTP status codes that should trigger a retry
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -342,7 +367,8 @@ class BrowserUseCUAClient(AgentClient):
                         category=StagehandFunctionName.AGENT,
                     )
 
-                    action_result: ActionExecutionResult = (
+                    # Note: perform_action returns a dict, not ActionExecutionResult
+                    action_result: dict[str, Any] = (
                         await self.handler.perform_action(agent_action)
                     )
 
@@ -456,12 +482,19 @@ class BrowserUseCUAClient(AgentClient):
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process browser-use API response.
 
-        The response format is:
+        With output_format, the response is structured:
         {
-            'completion': 'Reasoning text...\n\n<action>click [2]</action>',
+            'completion': {
+                'thinking': '...',
+                'memory': '...',
+                'next_goal': '...',
+                'action': [{'click_element': {'index': 2}}]
+            },
             'usage': {...},
             'cost': {...}
         }
+
+        Without output_format (fallback), completion is a string with XML tags.
 
         Returns:
             - List of AgentActions to execute
@@ -481,30 +514,102 @@ class BrowserUseCUAClient(AgentClient):
             )
             return [], None, False, None
 
-        completion = response.get("completion", "")
+        completion = response.get("completion", {})
         self.logger.info(
             f"[DEBUG] completion type: {type(completion).__name__}, value: {str(completion)[:500]}",
             category=StagehandFunctionName.AGENT,
         )
 
-        # completion is a STRING containing reasoning and <action>...</action> tags
-        if not isinstance(completion, str):
-            self.logger.error(
-                f"[DEBUG] completion is not a string! Type: {type(completion).__name__}",
-                category=StagehandFunctionName.AGENT,
-            )
-            return [], None, False, None
+        # Handle structured dict response (when output_format is provided)
+        if isinstance(completion, dict):
+            return self._process_structured_completion(completion)
 
+        # Fallback: Handle string response with XML tags (when output_format is not used)
+        if isinstance(completion, str):
+            return self._process_string_completion(completion)
+
+        self.logger.error(
+            f"[DEBUG] completion is neither dict nor string! Type: {type(completion).__name__}",
+            category=StagehandFunctionName.AGENT,
+        )
+        return [], None, False, None
+
+    def _process_structured_completion(
+        self, completion: dict[str, Any]
+    ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
+        """Process structured completion dict from browser-use API."""
+        # Extract reasoning from structured fields
+        thinking = completion.get("thinking")
+        memory = completion.get("memory")
+        next_goal = completion.get("next_goal")
+        eval_prev = completion.get("evaluation_previous_goal")
+
+        reasoning_parts = []
+        if thinking:
+            reasoning_parts.append(f"Thinking: {thinking}")
+        if next_goal:
+            reasoning_parts.append(f"Goal: {next_goal}")
+        if memory:
+            reasoning_parts.append(f"Memory: {memory}")
+        reasoning = " | ".join(reasoning_parts) if reasoning_parts else None
+
+        self.logger.info(
+            f"[DEBUG] Structured completion - thinking: {thinking is not None}, memory: {memory is not None}, next_goal: {next_goal is not None}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        # Extract actions
+        action_list = completion.get("action", [])
+        if not isinstance(action_list, list):
+            action_list = [action_list] if action_list else []
+
+        self.logger.info(
+            f"[DEBUG] Structured completion has {len(action_list)} actions: {action_list}",
+            category=StagehandFunctionName.AGENT,
+        )
+
+        agent_actions = []
+        is_done = False
+        done_message = None
+
+        for action_data in action_list:
+            if not isinstance(action_data, dict):
+                continue
+
+            # Check for done action
+            if "done" in action_data:
+                is_done = True
+                done_info = action_data["done"]
+                if isinstance(done_info, dict):
+                    done_message = done_info.get("text", done_info.get("message", "Task completed"))
+                else:
+                    done_message = str(done_info) if done_info else "Task completed"
+                self.logger.info(
+                    f"[DEBUG] Done action detected: {done_message}",
+                    category=StagehandFunctionName.AGENT,
+                )
+                continue
+
+            # Convert to AgentAction
+            agent_action = self._convert_action(action_data)
+            if agent_action:
+                agent_actions.append(agent_action)
+
+        return agent_actions, reasoning, is_done, done_message
+
+    def _process_string_completion(
+        self, completion: str
+    ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
+        """Process string completion with XML action tags (fallback mode)."""
         # Parse the completion string to extract reasoning and actions
-        # _parse_completion_string now returns action dicts directly
         reasoning, action_dicts = self._parse_completion_string(completion)
 
         self.logger.info(
-            f"[DEBUG] Parsed reasoning: {reasoning[:100] if reasoning else None}...",
+            f"[DEBUG] String completion parsed - reasoning: {reasoning[:100] if reasoning else None}...",
             category=StagehandFunctionName.AGENT,
         )
         self.logger.info(
-            f"[DEBUG] Parsed action dicts: {action_dicts}",
+            f"[DEBUG] String completion parsed - action dicts: {action_dicts}",
             category=StagehandFunctionName.AGENT,
         )
 
@@ -913,23 +1018,29 @@ class BrowserUseCUAClient(AgentClient):
     def _format_action_feedback(
         self,
         action: AgentAction,
-        action_result: ActionExecutionResult,
+        action_result: dict[str, Any],
         new_screenshot_base64: str,
     ) -> list[dict[str, Any]]:
-        """Format feedback after action execution."""
+        """Format feedback after action execution.
+
+        Note: action_result is a dict with 'success' and optional 'error' keys,
+        returned by CUAHandler.perform_action().
+        """
         feedback_content = []
 
-        # Add action result
-        if action_result.success:
+        # Add action result - handle dict access
+        success = action_result.get("success", False) if isinstance(action_result, dict) else getattr(action_result, "success", False)
+        error = action_result.get("error") if isinstance(action_result, dict) else getattr(action_result, "error", None)
+
+        if success:
             feedback_content.append({
                 "type": "text",
                 "text": "Action executed successfully.",
             })
         else:
-            error = action_result.error or "Unknown error"
             feedback_content.append({
                 "type": "text",
-                "text": f"Action failed: {error}",
+                "text": f"Action failed: {error or 'Unknown error'}",
             })
 
         # Add new DOM state
@@ -958,10 +1069,13 @@ class BrowserUseCUAClient(AgentClient):
 
     async def _make_api_call(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         """Make API call to browser-use with retry logic."""
+        # Include output_format schema to get structured JSON responses
+        # This matches how browser-use's SDK works
         payload = {
             "model": self.model,
             "messages": messages,
             "request_type": "browser_agent",
+            "output_format": BrowserUseAgentOutput.model_json_schema(),
         }
 
         last_error = None
