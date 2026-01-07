@@ -188,11 +188,17 @@ class CUAHandler:  # Computer Use Agent Handler
                 args = getattr(specific_action_model, "arguments", {})
                 if name == "goto" and args.url:
                     await self.page.goto(args.url)
+                    await self.handle_page_navigation("goto", initial_url)
                     return {"success": True}
                 elif name == "navigate_back":
                     await self.page.go_back()
+                    await self.handle_page_navigation("navigate_back", initial_url)
                     return {"success": True}
-                # Add other function calls like back, forward, reload if needed, similar to TS version
+                elif name == "navigate_forward":
+                    await self.page.go_forward()
+                    await self.handle_page_navigation("navigate_forward", initial_url)
+                    return {"success": True}
+                # Add other function calls like reload if needed, similar to TS version
                 self.logger.error(
                     f"Unsupported function call: {name}",
                     category=StagehandFunctionName.AGENT,
