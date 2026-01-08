@@ -10,6 +10,7 @@ import io
 import json
 import os
 import random
+import uuid
 from typing import Any, Optional, Union
 
 import httpx
@@ -160,10 +161,20 @@ class BrowserUseAgentOutput(BaseModel):
         """Override to set required fields like browser-use does."""
         schema = super().model_json_schema(**kwargs)
         schema["required"] = ["evaluation_previous_goal", "memory", "next_goal", "action"]
+        # Match browser-use's naming convention
+        schema["title"] = "AgentOutput"
+        if "$defs" in schema and "BrowserUseActionModel" in schema["$defs"]:
+            schema["$defs"]["ActionModel"] = schema["$defs"].pop("BrowserUseActionModel")
+            # Update references
+            if "action" in schema["properties"]:
+                action_prop = schema["properties"]["action"]
+                if "items" in action_prop and "$ref" in action_prop["items"]:
+                    action_prop["items"]["$ref"] = "#/$defs/ActionModel"
         return schema
 
 # HTTP status codes that should trigger a retry
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# Note: 400 is included because browser-use API sometimes returns transient 400 errors
+RETRYABLE_STATUS_CODES = {400, 429, 500, 502, 503, 504}
 
 # Browser-use API endpoint
 DEFAULT_BASE_URL = "https://llm.api.browser-use.com"
@@ -256,10 +267,15 @@ class BrowserUseCUAClient(AgentClient):
 
         # Request configuration
         self.timeout = kwargs.get("timeout", 120.0)
-        self.max_retries = kwargs.get("max_retries", 5)
+        # Browser-use API can be flaky with transient 400 errors, so use higher retry count
+        self.max_retries = kwargs.get("max_retries", 10)
+
+        # Session ID for sticky routing (same session → same container)
+        # This helps with API stability by routing all requests to the same backend
+        self.session_id = str(uuid.uuid4())
 
         self.logger.info(
-            f"BrowserUseCUAClient initialized for model: {self.model}",
+            f"BrowserUseCUAClient initialized for model: {self.model} (session: {self.session_id[:8]}...)",
             category=StagehandFunctionName.AGENT,
         )
 
@@ -584,6 +600,8 @@ class BrowserUseCUAClient(AgentClient):
                 "type": "image_url",
                 "image_url": {
                     "url": f"data:image/jpeg;base64,{resized_screenshot}",
+                    "media_type": "image/jpeg",
+                    "detail": "auto",
                 },
             })
 
@@ -917,10 +935,11 @@ class BrowserUseCUAClient(AgentClient):
         return reasoning, actions
 
     def _sanitize_text_value(self, text: str) -> str:
-        """Sanitize text value by removing XML/markup artifacts.
+        """Sanitize text value by removing XML/markup artifacts and formatting.
 
         The model sometimes outputs malformed responses where XML tags leak into
-        text values, e.g., 'email@example.com"\n</execute_action>'. This method
+        text values, e.g., 'email@example.com"\n</execute_action>'. It also may
+        include markdown formatting like backticks around values. This method
         cleans such artifacts.
 
         Args:
@@ -947,6 +966,11 @@ class BrowserUseCUAClient(AgentClient):
 
         # Strip any remaining leading/trailing whitespace
         text = text.strip()
+
+        # Strip surrounding backticks (markdown inline code formatting)
+        # The model sometimes outputs text like `email@example.com` with backticks
+        if text.startswith('`') and text.endswith('`'):
+            text = text[1:-1]
 
         # Also strip surrounding quotes if present (in case of double-quoting)
         if (text.startswith('"') and text.endswith('"')) or \
@@ -1669,6 +1693,8 @@ class BrowserUseCUAClient(AgentClient):
                 "type": "image_url",
                 "image_url": {
                     "url": f"data:image/jpeg;base64,{resized_screenshot}",
+                    "media_type": "image/jpeg",
+                    "detail": "auto",
                 },
             })
 
@@ -1680,18 +1706,38 @@ class BrowserUseCUAClient(AgentClient):
         Passes output_format schema so the API returns structured JSON
         that we can validate with Pydantic.
         """
+        # Note: output_format is intentionally NOT included because it causes
+        # significant API instability (~60% failure rate vs 0% without it).
+        # We rely on string parsing of the response instead.
         payload = {
             "model": self.model,
             "messages": messages,
             "request_type": "browser_agent",
-            # Note: output_format causes intermittent 400 errors with the browser-use API
-            # so we rely on string parsing instead (which works consistently)
+            "fast": False,  # Required by browser-use API
+            "anonymized_telemetry": True,  # Required by browser-use API
+            "session_id": self.session_id,  # Sticky routing for API stability
         }
 
-        # Debug: Log payload size
+        # Debug: Log payload size and dump to file
         payload_str = json.dumps(payload)
         self.logger.info(
             f"[DEBUG] API payload size: {len(payload_str)} bytes ({len(payload_str) / 1024:.1f} KB)",
+            category=StagehandFunctionName.AGENT,
+        )
+        # Dump payload to file for debugging
+        with open("/tmp/debug_payload.json", "w") as f:
+            # Create a copy without the full image data for inspection
+            debug_payload = json.loads(payload_str)
+            if "messages" in debug_payload:
+                for msg in debug_payload["messages"]:
+                    if isinstance(msg.get("content"), list):
+                        for item in msg["content"]:
+                            if item.get("type") == "image_url":
+                                url = item.get("image_url", {}).get("url", "")
+                                item["image_url"]["url"] = url[:100] + "...[truncated]..." if len(url) > 100 else url
+            json.dump(debug_payload, f, indent=2)
+        self.logger.info(
+            f"[DEBUG] Payload dumped to /tmp/debug_payload.json",
             category=StagehandFunctionName.AGENT,
         )
         # Log individual message sizes
@@ -1725,8 +1771,8 @@ class BrowserUseCUAClient(AgentClient):
                 if status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries - 1:
                     delay = min(1.0 * (2**attempt), 60.0)
                     jitter = random.uniform(0, delay * 0.1)
-                    self.logger.warning(
-                        f"Got {status_code}, retrying in {delay + jitter:.1f}s..."
+                    self.logger.info(
+                        f"Got {status_code}, retrying in {delay + jitter:.1f}s (attempt {attempt + 1}/{self.max_retries})..."
                     )
                     await asyncio.sleep(delay + jitter)
                     continue
@@ -1745,7 +1791,7 @@ class BrowserUseCUAClient(AgentClient):
                 last_error = e
                 if attempt < self.max_retries - 1:
                     delay = min(1.0 * (2**attempt), 60.0)
-                    self.logger.warning(f"Network error, retrying in {delay:.1f}s...")
+                    self.logger.info(f"Network error, retrying in {delay:.1f}s (attempt {attempt + 1}/{self.max_retries})...")
                     await asyncio.sleep(delay)
                     continue
 
@@ -1805,6 +1851,8 @@ class BrowserUseCUAClient(AgentClient):
             "type": "image_url",
             "image_url": {
                 "url": f"data:image/jpeg;base64,{resized}",
+                "media_type": "image/jpeg",
+                "detail": "auto",
             },
         }
 
