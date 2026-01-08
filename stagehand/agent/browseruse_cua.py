@@ -1077,6 +1077,7 @@ class BrowserUseCUAClient(AgentClient):
 
         elif action_type in ("navigate", "goto"):
             url = attrs.get("url", attrs.get("href", ""))
+            url = self._sanitize_text_value(url)
             return {"navigate": {"url": url}}
 
         elif action_type in ("go_back", "back"):
@@ -1355,9 +1356,9 @@ class BrowserUseCUAClient(AgentClient):
             return {"go_back": {}}
 
         # navigate url - only match actual URLs (http/https or common domains)
-        navigate_match = re.match(r"(?:navigate|goto|go_to|go\s+to)\s+[\"']?(https?://[^\s\"']+|www\.[^\s\"']+|\S+\.\S+/[^\s\"']*)[\"']?", action_str, re.IGNORECASE)
+        navigate_match = re.match(r"(?:navigate|goto|go_to|go\s+to)\s+[\"'`]?(https?://[^\s\"'`]+|www\.[^\s\"'`]+|\S+\.\S+/[^\s\"'`]*)[\"'`]?", action_str, re.IGNORECASE)
         if navigate_match:
-            url = navigate_match.group(1).strip().strip('"\'')
+            url = navigate_match.group(1).strip().strip('"\'`')
             # Validate it looks like a URL
             if '.' in url or url.startswith('http'):
                 return {"navigate": {"url": url}}
@@ -1605,6 +1606,7 @@ class BrowserUseCUAClient(AgentClient):
 
         elif action_type == "navigate":
             url = params.get("url", "")
+            url = self._sanitize_text_value(url)
             return {
                 "type": "function",
                 "name": "goto",
