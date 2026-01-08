@@ -910,12 +910,32 @@ class BrowserUseCUAClient(AgentClient):
             if action_str.lower().startswith("action:"):
                 action_str = action_str[7:].strip()
 
-            parsed_actions = self._parse_action_content(action_str)
-            if parsed_actions:
-                if isinstance(parsed_actions, list):
-                    actions.extend(parsed_actions)
-                else:
-                    actions.append(parsed_actions)
+            # First try parsing line by line for multi-line action sequences
+            # e.g., "Type X into Y\nClick button Z"
+            lines = [line.strip() for line in action_str.split('\n') if line.strip()]
+            if len(lines) > 1:
+                for line in lines:
+                    # Skip lines that look like explanatory text (too long, no action keywords)
+                    if len(line) > 200:
+                        continue
+                    # Check if line starts with an action keyword
+                    action_keywords = ['type', 'click', 'input', 'scroll', 'navigate', 'goto', 'press', 'send_keys', 'wait', 'done', 'go_back']
+                    if any(line.lower().startswith(kw) for kw in action_keywords):
+                        parsed = self._parse_action_content(line)
+                        if parsed:
+                            if isinstance(parsed, list):
+                                actions.extend(parsed)
+                            else:
+                                actions.append(parsed)
+
+            # If no actions from line-by-line, try parsing the whole string
+            if not actions:
+                parsed_actions = self._parse_action_content(action_str)
+                if parsed_actions:
+                    if isinstance(parsed_actions, list):
+                        actions.extend(parsed_actions)
+                    else:
+                        actions.append(parsed_actions)
 
         # Extract reasoning (everything before the first <action tag)
         first_action_pos = completion.find("<action")
@@ -1018,7 +1038,7 @@ class BrowserUseCUAClient(AgentClient):
 
         action_type = attrs.get("type", "").lower()
 
-        # Helper to extract index from selector or index attribute
+        # Helper to extract index from selector, index, or target attribute
         def get_index_from_attrs(attrs: dict) -> Optional[int]:
             # First check for explicit index attribute
             if "index" in attrs:
@@ -1026,6 +1046,14 @@ class BrowserUseCUAClient(AgentClient):
                     return int(attrs["index"])
                 except ValueError:
                     pass
+
+            # Check for target attribute (model sometimes uses target instead of index)
+            if "target" in attrs:
+                target = attrs["target"]
+                # Target might be just a number or [number]
+                target_match = re.search(r'^\[?(\d+)\]?$', target)
+                if target_match:
+                    return int(target_match.group(1))
 
             # Then check selector for [digit] pattern (e.g., "[2]" or "2")
             selector = attrs.get("selector", "")
@@ -1187,6 +1215,21 @@ class BrowserUseCUAClient(AgentClient):
             index = int(bare_index_match.group(1))
             return {"click_element": {"index": index}}
 
+        # [index]Type "text" format - index prefix with action
+        # e.g., [2]Type "hello" -> type "hello" into element 2
+        index_type_match = re.match(r'^\[(\d+)\]\s*(?:type|input)\s*["\']([^"\']+)["\']$', action_str, re.IGNORECASE)
+        if index_type_match:
+            index = int(index_type_match.group(1))
+            text = self._sanitize_text_value(index_type_match.group(2))
+            return {"input_text": {"index": index, "text": text}}
+
+        # [index]Click format - index prefix with click action (optional description)
+        # e.g., [6]Click -> click element 6, [2]Click Log in -> click element 2
+        index_click_match = re.match(r'^\[(\d+)\]\s*click(?:\s+.*)?$', action_str, re.IGNORECASE)
+        if index_click_match:
+            index = int(index_click_match.group(1))
+            return {"click_element": {"index": index}}
+
         # click(index) - function call syntax for click
         click_func_match = re.match(r"click\s*\(\s*(\d+)\s*\)", action_str, re.IGNORECASE)
         if click_func_match:
@@ -1198,6 +1241,28 @@ class BrowserUseCUAClient(AgentClient):
         if click_match:
             index = int(click_match.group(1))
             return {"click_element": {"index": index}}
+
+        # Click button/element with text "X" - natural language click
+        # e.g., "Click button with text 'Next'" or "Click element with text 'Submit'"
+        # Also handles without quotes: "Click button with text Next"
+        click_text_match = re.match(
+            r'click\s+(?:button|element|link|on)?\s*(?:with\s+)?text\s*[=:]?\s*["\']?([^"\']+?)["\']?\s*$',
+            action_str, re.IGNORECASE
+        )
+        if click_text_match:
+            button_text = click_text_match.group(1).strip()
+            # Return a click with text selector - will need to be resolved by looking at DOM
+            return {"click_element": {"text": button_text}}
+
+        # Click button "X" - simpler format without "with text"
+        # e.g., 'Click button "Next"' or 'Click button "Submit"'
+        click_button_match = re.match(
+            r'click\s+(?:button|element|link)\s*["\']([^"\']+)["\']',
+            action_str, re.IGNORECASE
+        )
+        if click_button_match:
+            button_text = click_button_match.group(1).strip()
+            return {"click_element": {"text": button_text}}
 
         # type_text_in_element[index, text] - square bracket format with comma
         type_in_element_match = re.match(
@@ -1298,9 +1363,9 @@ class BrowserUseCUAClient(AgentClient):
                 # CSS selector or description - use as css_selector
                 return {"input_text": {"css_selector": target, "text": text}}
 
-        # "into" format: type text into selector
+        # "into" format: type text into selector (stop at newline to handle multi-line)
         into_match = re.match(
-            r'(?:type_text|type|input_text)\s+(.+?)\s+into\s+(.+)',
+            r'(?:type_text|type|input_text)\s+(.+?)\s+into\s+([^\n]+)',
             action_str, re.IGNORECASE
         )
         if into_match:
@@ -1311,6 +1376,17 @@ class BrowserUseCUAClient(AgentClient):
                 index = int(re.search(r'\d+', selector).group())
                 return {"input_text": {"index": index, "text": text}}
             else:
+                # Check if selector is natural language with id reference
+                # e.g., "input with id 'identifierId'" or "input with id \"identifierId\""
+                id_match = re.search(r'(?:with\s+)?id\s*[=:"\']?\s*["\']?([^"\'>\s]+)["\']?', selector, re.IGNORECASE)
+                if id_match:
+                    element_id = id_match.group(1).strip('"\'')
+                    return {"input_text": {"css_selector": f"#{element_id}", "text": text}}
+                # Check for name attribute reference
+                name_match = re.search(r'(?:with\s+)?name\s*[=:"\']?\s*["\']?([^"\'>\s]+)["\']?', selector, re.IGNORECASE)
+                if name_match:
+                    element_name = name_match.group(1).strip('"\'')
+                    return {"input_text": {"css_selector": f"[name='{element_name}']", "text": text}}
                 return {"input_text": {"css_selector": selector, "text": text}}
 
         # type_text #selector text OR type_text selector text (CSS selector with space-separated text)
@@ -1508,9 +1584,10 @@ class BrowserUseCUAClient(AgentClient):
         """Map browser-use action to stagehand action format."""
 
         if action_type == "click_element":
-            # Get coordinates from index, CSS selector, or direct coordinates
+            # Get coordinates from index, CSS selector, text, or direct coordinates
             index = params.get("index")
             css_selector = params.get("css_selector")
+            text = params.get("text")  # Natural language text selector
             coord_x = params.get("coordinate_x")
             coord_y = params.get("coordinate_y")
 
@@ -1541,6 +1618,35 @@ class BrowserUseCUAClient(AgentClient):
                             }
                 except Exception as e:
                     self.logger.info(f"[DEBUG] Failed to find element by CSS selector '{css_selector}': {e}")
+            elif text and self.handler and self.handler.page:
+                # Use Playwright's text selector to find element by visible text
+                try:
+                    # Try multiple selector strategies for text matching
+                    selectors_to_try = [
+                        f"text={text}",  # Playwright text selector
+                        f"button:has-text('{text}')",  # Button with text
+                        f"a:has-text('{text}')",  # Link with text
+                        f"[type='submit']:has-text('{text}')",  # Submit button
+                        f"input[value='{text}']",  # Input with value
+                    ]
+                    for selector in selectors_to_try:
+                        try:
+                            element = await self.handler.page.query_selector(selector)
+                            if element:
+                                box = await element.bounding_box()
+                                if box:
+                                    x = int(box["x"] + box["width"] / 2)
+                                    y = int(box["y"] + box["height"] / 2)
+                                    return {
+                                        "type": "click",
+                                        "x": x,
+                                        "y": y,
+                                        "button": "left",
+                                    }
+                        except Exception:
+                            continue
+                except Exception as e:
+                    self.logger.info(f"[DEBUG] Failed to find element by text '{text}': {e}")
             elif coord_x is not None and coord_y is not None:
                 return {
                     "type": "click",
