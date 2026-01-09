@@ -295,11 +295,6 @@ class BrowserUseCUAClient(AgentClient):
         options: Optional[AgentExecuteOptions] = None,
     ) -> AgentResult:
         """Run a browser automation task using browser-use API."""
-        self.logger.info(
-            f"[DEBUG] run_task called with instruction: '{instruction}'",
-            category=StagehandFunctionName.AGENT,
-        )
-
         if self.config and self.config.max_steps is not None:
             max_steps = self.config.max_steps
 
@@ -320,59 +315,17 @@ class BrowserUseCUAClient(AgentClient):
                 usage=AgentUsage(input_tokens=0, output_tokens=0, inference_time_ms=0),
             )
 
-        self.logger.info(
-            "[DEBUG] Handler available, injecting cursor...",
-            category=StagehandFunctionName.AGENT,
-        )
-
         # Inject cursor for visual feedback
         await self.handler.inject_cursor()
 
-        self.logger.info(
-            "[DEBUG] Getting initial screenshot...",
-            category=StagehandFunctionName.AGENT,
-        )
-
         # Get initial state
         current_screenshot_b64 = await self.handler.get_screenshot_base64()
-
-        self.logger.info(
-            f"[DEBUG] Screenshot obtained, length: {len(current_screenshot_b64) if current_screenshot_b64 else 0}",
-            category=StagehandFunctionName.AGENT,
-        )
-
-        self.logger.info(
-            "[DEBUG] Getting DOM service...",
-            category=StagehandFunctionName.AGENT,
-        )
-
         dom_service = await self._get_dom_service()
-
-        self.logger.info(
-            "[DEBUG] Getting DOM state...",
-            category=StagehandFunctionName.AGENT,
-        )
-
         self._current_dom_state = await dom_service.get_dom_state()
-
-        self.logger.info(
-            f"[DEBUG] DOM state obtained: {self._current_dom_state is not None}",
-            category=StagehandFunctionName.AGENT,
-        )
-
-        self.logger.info(
-            "[DEBUG] Formatting initial messages...",
-            category=StagehandFunctionName.AGENT,
-        )
 
         # Format initial messages
         messages = self._format_initial_messages(
             instruction, current_screenshot_b64
-        )
-
-        self.logger.info(
-            f"[DEBUG] Initial messages formatted, count: {len(messages)}",
-            category=StagehandFunctionName.AGENT,
         )
 
         actions_taken: list[AgentAction] = []
@@ -388,46 +341,21 @@ class BrowserUseCUAClient(AgentClient):
                 category=StagehandFunctionName.AGENT,
             )
 
-            # Make API call
-            self.logger.info(
-                "[DEBUG] Making API call...",
-                category=StagehandFunctionName.AGENT,
-            )
-
             start_time = asyncio.get_event_loop().time()
             try:
                 response = await self._make_api_call(messages)
                 end_time = asyncio.get_event_loop().time()
                 total_inference_time_ms += int((end_time - start_time) * 1000)
 
-                self.logger.info(
-                    f"[DEBUG] API response received. Type: {type(response).__name__}",
-                    category=StagehandFunctionName.AGENT,
-                )
-                self.logger.info(
-                    f"[DEBUG] API response content: {str(response)[:500]}...",
-                    category=StagehandFunctionName.AGENT,
-                )
-
                 # Extract usage - with safety check
                 if isinstance(response, dict):
                     usage = response.get("usage", {})
                     total_input_tokens += usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
                     total_output_tokens += usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-                else:
-                    self.logger.error(
-                        f"[DEBUG] Response is not a dict! Type: {type(response).__name__}, Value: {response}",
-                        category=StagehandFunctionName.AGENT,
-                    )
 
             except Exception as e:
                 self.logger.error(
                     f"BrowserUse API call failed: {e}",
-                    category=StagehandFunctionName.AGENT,
-                )
-                import traceback
-                self.logger.error(
-                    f"[DEBUG] Full traceback: {traceback.format_exc()}",
                     category=StagehandFunctionName.AGENT,
                 )
                 return AgentResult(
@@ -442,22 +370,12 @@ class BrowserUseCUAClient(AgentClient):
                 )
 
             # Process response
-            self.logger.info(
-                "[DEBUG] Processing provider response...",
-                category=StagehandFunctionName.AGENT,
-            )
-
             (
                 agent_actions,
                 reasoning,
                 is_done,
                 done_message,
             ) = await self._process_provider_response(response)
-
-            self.logger.info(
-                f"[DEBUG] Processed response - actions: {len(agent_actions)}, reasoning: {reasoning is not None}, is_done: {is_done}",
-                category=StagehandFunctionName.AGENT,
-            )
 
             if reasoning:
                 self.logger.info(
@@ -478,78 +396,32 @@ class BrowserUseCUAClient(AgentClient):
 
             # Execute actions
             if agent_actions:
-                self.logger.info(
-                    f"[DEBUG] Executing {len(agent_actions)} actions...",
-                    category=StagehandFunctionName.AGENT,
-                )
-
                 for idx, agent_action in enumerate(agent_actions):
-                    self.logger.info(
-                        f"[DEBUG] Executing action {idx + 1}/{len(agent_actions)}: {agent_action}",
-                        category=StagehandFunctionName.AGENT,
-                    )
-
                     actions_taken.append(agent_action)
 
                     # Execute the action
-                    self.logger.info(
-                        "[DEBUG] Calling handler.perform_action...",
-                        category=StagehandFunctionName.AGENT,
-                    )
-
-                    # Note: perform_action returns a dict, not ActionExecutionResult
                     action_result: dict[str, Any] = (
                         await self.handler.perform_action(agent_action)
                     )
 
-                    self.logger.info(
-                        f"[DEBUG] Action result type: {type(action_result).__name__}",
-                        category=StagehandFunctionName.AGENT,
-                    )
-                    self.logger.info(
-                        f"[DEBUG] Action result: {action_result}",
-                        category=StagehandFunctionName.AGENT,
-                    )
-
                     # Get new state after action
-                    self.logger.info(
-                        "[DEBUG] Getting new screenshot after action...",
-                        category=StagehandFunctionName.AGENT,
-                    )
-
                     current_screenshot_b64 = await self.handler.get_screenshot_base64()
                     self._current_dom_state = await dom_service.get_dom_state()
 
                     # Format feedback
-                    self.logger.info(
-                        "[DEBUG] Formatting action feedback...",
-                        category=StagehandFunctionName.AGENT,
-                    )
-
                     feedback = self._format_action_feedback(
                         action=agent_action,
                         action_result=action_result,
                         new_screenshot_base64=current_screenshot_b64,
                     )
-
-                    self.logger.info(
-                        f"[DEBUG] Feedback formatted, extending messages with {len(feedback)} items",
-                        category=StagehandFunctionName.AGENT,
-                    )
-
                     messages.extend(feedback)
 
             else:
                 # No actions returned - continue loop, only exit on explicit done
-                self.logger.info(
+                self.logger.debug(
                     "Model did not return any actions. Continuing to wait for done signal.",
                     category=StagehandFunctionName.AGENT,
                 )
-
-        self.logger.info(
-            f"[DEBUG] run_task completing. completed={task_completed}, actions={len(actions_taken)}",
-            category=StagehandFunctionName.AGENT,
-        )
 
         return AgentResult(
             actions=[act.action for act in actions_taken if act.action],
@@ -634,23 +506,10 @@ class BrowserUseCUAClient(AgentClient):
             - Whether task is done
             - Done message (if task is done)
         """
-        self.logger.info(
-            f"[DEBUG] _process_provider_response called. response type: {type(response).__name__}",
-            category=StagehandFunctionName.AGENT,
-        )
-
         if not isinstance(response, dict):
-            self.logger.error(
-                f"[DEBUG] Response is not a dict! Type: {type(response).__name__}, Value: {str(response)[:200]}",
-                category=StagehandFunctionName.AGENT,
-            )
             return [], None, False, None
 
         completion = response.get("completion", {})
-        self.logger.info(
-            f"[DEBUG] completion type: {type(completion).__name__}, value: {str(completion)[:500]}",
-            category=StagehandFunctionName.AGENT,
-        )
 
         # Handle structured dict response (when output_format is provided)
         if isinstance(completion, dict):
@@ -660,10 +519,6 @@ class BrowserUseCUAClient(AgentClient):
         if isinstance(completion, str):
             return await self._process_string_completion(completion)
 
-        self.logger.error(
-            f"[DEBUG] completion is neither dict nor string! Type: {type(completion).__name__}",
-            category=StagehandFunctionName.AGENT,
-        )
         return [], None, False, None
 
     async def _process_structured_completion(
@@ -676,15 +531,7 @@ class BrowserUseCUAClient(AgentClient):
         # Try to validate with Pydantic model
         try:
             validated = BrowserUseAgentOutput.model_validate(completion)
-            self.logger.info(
-                f"[DEBUG] Successfully validated completion with Pydantic",
-                category=StagehandFunctionName.AGENT,
-            )
-        except Exception as e:
-            self.logger.info(
-                f"[DEBUG] Pydantic validation failed: {e}, falling back to dict parsing",
-                category=StagehandFunctionName.AGENT,
-            )
+        except Exception:
             # Fall back to dict-based parsing
             return await self._process_structured_completion_dict(completion)
 
@@ -698,15 +545,6 @@ class BrowserUseCUAClient(AgentClient):
             reasoning_parts.append(f"Memory: {validated.memory}")
         reasoning = " | ".join(reasoning_parts) if reasoning_parts else None
 
-        self.logger.info(
-            f"[DEBUG] Structured completion - thinking: {validated.thinking is not None}, memory: {validated.memory is not None}, next_goal: {validated.next_goal is not None}",
-            category=StagehandFunctionName.AGENT,
-        )
-        self.logger.info(
-            f"[DEBUG] Structured completion has {len(validated.action)} actions",
-            category=StagehandFunctionName.AGENT,
-        )
-
         agent_actions = []
         is_done = False
         done_message = None
@@ -718,19 +556,11 @@ class BrowserUseCUAClient(AgentClient):
                 continue
 
             action_type, action_params = action_info
-            self.logger.info(
-                f"[DEBUG] Processing action: {action_type} with params: {action_params}",
-                category=StagehandFunctionName.AGENT,
-            )
 
             # Check for done action
             if action_type == "done":
                 is_done = True
                 done_message = action_params.text if hasattr(action_params, 'text') else "Task completed"
-                self.logger.info(
-                    f"[DEBUG] Done action detected: {done_message}",
-                    category=StagehandFunctionName.AGENT,
-                )
                 continue
 
             # Convert to AgentAction using the validated model
@@ -790,23 +620,8 @@ class BrowserUseCUAClient(AgentClient):
         self, completion: str
     ) -> tuple[list[AgentAction], Optional[str], bool, Optional[str]]:
         """Process string completion with XML action tags (fallback mode)."""
-        # Log the raw completion string for debugging
-        self.logger.info(
-            f"[DEBUG] Raw completion string:\n{completion}",
-            category=StagehandFunctionName.AGENT,
-        )
-
         # Parse the completion string to extract reasoning and actions
         reasoning, action_dicts = self._parse_completion_string(completion)
-
-        self.logger.info(
-            f"[DEBUG] String completion parsed - reasoning: {reasoning[:100] if reasoning else None}...",
-            category=StagehandFunctionName.AGENT,
-        )
-        self.logger.info(
-            f"[DEBUG] String completion parsed - action dicts: {action_dicts}",
-            category=StagehandFunctionName.AGENT,
-        )
 
         agent_actions = []
         is_done = False
@@ -820,10 +635,6 @@ class BrowserUseCUAClient(AgentClient):
             if "done" in action_data:
                 is_done = True
                 done_message = action_data["done"].get("text", "Task completed")
-                self.logger.info(
-                    f"[DEBUG] Done action detected: {done_message}",
-                    category=StagehandFunctionName.AGENT,
-                )
                 continue
 
             # Convert to AgentAction
@@ -851,11 +662,6 @@ class BrowserUseCUAClient(AgentClient):
         """
         import re
 
-        self.logger.info(
-            f"[DEBUG] _parse_completion_string input: '{completion}'",
-            category=StagehandFunctionName.AGENT,
-        )
-
         actions = []
 
         # Pattern 1: Self-closing XML tags like <action type="click" selector="[2]"/>
@@ -865,10 +671,6 @@ class BrowserUseCUAClient(AgentClient):
 
         for match in self_closing_matches:
             attrs_str = match.group(1)
-            self.logger.info(
-                f"[DEBUG] Found self-closing action tag with attrs: '{attrs_str}'",
-                category=StagehandFunctionName.AGENT,
-            )
             action_dict = self._parse_action_attributes(attrs_str)
             if action_dict:
                 actions.append(action_dict)
@@ -879,10 +681,6 @@ class BrowserUseCUAClient(AgentClient):
         content_matches = re.findall(content_pattern, completion, re.DOTALL)
 
         for tag_name, content in content_matches:
-            self.logger.info(
-                f"[DEBUG] Found content-based action tag <{tag_name}>: '{content}'",
-                category=StagehandFunctionName.AGENT,
-            )
             # Check if content contains nested <action> tags
             nested_actions = re.findall(r'<action>(.*?)</action>', content, re.DOTALL)
             if nested_actions:
@@ -947,11 +745,6 @@ class BrowserUseCUAClient(AgentClient):
             # No action tags found - if we parsed actions, reasoning is None
             reasoning = None if actions else (completion.strip() if completion.strip() else None)
 
-        self.logger.info(
-            f"[DEBUG] Parsed {len(actions)} actions, reasoning: {reasoning[:100] if reasoning else None}...",
-            category=StagehandFunctionName.AGENT,
-        )
-
         return reasoning, actions
 
     def _sanitize_text_value(self, text: str) -> str:
@@ -972,8 +765,6 @@ class BrowserUseCUAClient(AgentClient):
 
         if not text:
             return text
-
-        original_text = text
 
         # Remove trailing XML-like tags (e.g., </execute_action>, </action>, etc.)
         # These can appear when the model's output is malformed
@@ -997,12 +788,6 @@ class BrowserUseCUAClient(AgentClient):
            (text.startswith("'") and text.endswith("'")):
             text = text[1:-1]
 
-        if text != original_text:
-            self.logger.info(
-                f"[DEBUG] Sanitized text: '{original_text}' -> '{text}'",
-                category=StagehandFunctionName.AGENT,
-            )
-
         return text
 
     def _parse_action_attributes(self, attrs_str: str) -> Optional[dict[str, Any]]:
@@ -1018,11 +803,6 @@ class BrowserUseCUAClient(AgentClient):
         """
         import re
 
-        self.logger.info(
-            f"[DEBUG] Parsing action attributes: '{attrs_str}'",
-            category=StagehandFunctionName.AGENT,
-        )
-
         # Extract all attribute key="value" pairs
         # Handle double-quoted and single-quoted attributes separately
         # to properly support nested quotes like selector="[id='foo']"
@@ -1030,11 +810,6 @@ class BrowserUseCUAClient(AgentClient):
         single_quoted = re.findall(r"(\w+)\s*=\s*'([^']*)'", attrs_str)
         attrs = dict(double_quoted)
         attrs.update(dict(single_quoted))
-
-        self.logger.info(
-            f"[DEBUG] Extracted attributes: {attrs}",
-            category=StagehandFunctionName.AGENT,
-        )
 
         action_type = attrs.get("type", "").lower()
 
@@ -1174,10 +949,6 @@ class BrowserUseCUAClient(AgentClient):
                 index = int(index_match.group(1))
                 return {"dropdown_options": {"index": index}}
 
-        self.logger.info(
-            f"[DEBUG] Unknown action type in attributes: '{action_type}' from '{attrs_str}'",
-            category=StagehandFunctionName.AGENT,
-        )
         return None
 
     def _parse_action_content(self, action_str: str) -> Optional[dict[str, Any] | list[dict[str, Any]]]:
@@ -1203,11 +974,6 @@ class BrowserUseCUAClient(AgentClient):
         import re
 
         action_str = action_str.strip()
-
-        self.logger.info(
-            f"[DEBUG] Parsing action content: '{action_str}'",
-            category=StagehandFunctionName.AGENT,
-        )
 
         # Just a number or [number] - interpret as click
         bare_index_match = re.match(r"^\[?(\d+)\]?$", action_str.strip())
@@ -1499,10 +1265,6 @@ class BrowserUseCUAClient(AgentClient):
             text = self._sanitize_text_value(input_match.group(2).strip().strip('"\''))
             return {"input_text": {"index": index, "text": text}}
 
-        self.logger.info(
-            f"[DEBUG] Could not parse action content: '{action_str}'",
-            category=StagehandFunctionName.AGENT,
-        )
         return None
 
     async def _convert_action_model(
@@ -1530,8 +1292,6 @@ class BrowserUseCUAClient(AgentClient):
 
         except Exception as e:
             self.logger.error(f"Failed to convert action model: {e}")
-            import traceback
-            self.logger.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
             return None
 
     async def _convert_action(self, action_data: dict[str, Any]) -> Optional[AgentAction]:
@@ -1556,7 +1316,6 @@ class BrowserUseCUAClient(AgentClient):
                     break
 
             if not action_type:
-                self.logger.info(f"[DEBUG] Unknown action format: {action_data}")
                 return None
 
             action_payload = await self._map_action_to_stagehand(action_type, action_params)
@@ -1616,8 +1375,8 @@ class BrowserUseCUAClient(AgentClient):
                                 "y": y,
                                 "button": "left",
                             }
-                except Exception as e:
-                    self.logger.info(f"[DEBUG] Failed to find element by CSS selector '{css_selector}': {e}")
+                except Exception:
+                    pass
             elif text and self.handler and self.handler.page:
                 # Use Playwright's text selector to find element by visible text
                 try:
@@ -1645,8 +1404,8 @@ class BrowserUseCUAClient(AgentClient):
                                     }
                         except Exception:
                             continue
-                except Exception as e:
-                    self.logger.info(f"[DEBUG] Failed to find element by text '{text}': {e}")
+                except Exception:
+                    pass
             elif coord_x is not None and coord_y is not None:
                 return {
                     "type": "click",
@@ -1655,7 +1414,6 @@ class BrowserUseCUAClient(AgentClient):
                     "button": "left",
                 }
 
-            self.logger.info(f"[DEBUG] Could not resolve click coordinates for: {params}")
             return None
 
         elif action_type == "input_text":
@@ -1679,8 +1437,8 @@ class BrowserUseCUAClient(AgentClient):
                         if box:
                             x = int(box["x"] + box["width"] / 2)
                             y = int(box["y"] + box["height"] / 2)
-                except Exception as e:
-                    self.logger.info(f"[DEBUG] Failed to find element by CSS selector '{css_selector}': {e}")
+                except Exception:
+                    pass
 
             return {
                 "type": "type",
@@ -1826,36 +1584,6 @@ class BrowserUseCUAClient(AgentClient):
             "session_id": self.session_id,  # Sticky routing for API stability
         }
 
-        # Debug: Log payload size and dump to file
-        payload_str = json.dumps(payload)
-        self.logger.info(
-            f"[DEBUG] API payload size: {len(payload_str)} bytes ({len(payload_str) / 1024:.1f} KB)",
-            category=StagehandFunctionName.AGENT,
-        )
-        # Dump payload to file for debugging
-        with open("/tmp/debug_payload.json", "w") as f:
-            # Create a copy without the full image data for inspection
-            debug_payload = json.loads(payload_str)
-            if "messages" in debug_payload:
-                for msg in debug_payload["messages"]:
-                    if isinstance(msg.get("content"), list):
-                        for item in msg["content"]:
-                            if item.get("type") == "image_url":
-                                url = item.get("image_url", {}).get("url", "")
-                                item["image_url"]["url"] = url[:100] + "...[truncated]..." if len(url) > 100 else url
-            json.dump(debug_payload, f, indent=2)
-        self.logger.info(
-            f"[DEBUG] Payload dumped to /tmp/debug_payload.json",
-            category=StagehandFunctionName.AGENT,
-        )
-        # Log individual message sizes
-        for i, msg in enumerate(messages):
-            msg_str = json.dumps(msg)
-            self.logger.info(
-                f"[DEBUG] Message {i} ({msg.get('role', 'unknown')}): {len(msg_str)} bytes",
-                category=StagehandFunctionName.AGENT,
-            )
-
         last_error = None
 
         for attempt in range(self.max_retries):
@@ -1942,13 +1670,6 @@ class BrowserUseCUAClient(AgentClient):
         buffer = io.BytesIO()
         img.save(buffer, format="JPEG", quality=85, optimize=True)
         resized_b64 = base64.b64encode(buffer.getvalue()).decode()
-
-        self.logger.info(
-            f"[DEBUG] Screenshot processed: {original_size} -> {img.size}, "
-            f"size: {len(screenshot_b64)} -> {len(resized_b64)} bytes "
-            f"({len(resized_b64) / len(screenshot_b64) * 100:.1f}%)",
-            category=StagehandFunctionName.AGENT,
-        )
 
         return resized_b64
 
