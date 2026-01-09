@@ -1040,6 +1040,18 @@ class BrowserUseCUAClient(AgentClient):
             text = self._sanitize_text_value(type_in_element_match.group(2).strip().strip('"\''))
             return {"input_text": {"index": index, "text": text}}
 
+        # type_text_in_element_with_text "element text" "text to type"
+        # e.g., type_text_in_element_with_text "Enter your password" "mypassword"
+        # First arg is the element's placeholder/label text, second is the text to type
+        type_in_element_with_text_match = re.match(
+            r'type_text_in_element_with_text\s+["\']([^"\']+)["\']\s+["\']([^"\']+)["\']',
+            action_str, re.IGNORECASE
+        )
+        if type_in_element_with_text_match:
+            element_text = type_in_element_with_text_match.group(1).strip()
+            text_to_type = self._sanitize_text_value(type_in_element_with_text_match.group(2))
+            return {"input_text": {"element_text": element_text, "text": text_to_type}}
+
         # Nested XML format: <type>set_element_value</type> <element_selector>...</element_selector> <value>...</value>
         nested_xml_type = re.search(r'<type>\s*(.*?)\s*</type>', action_str, re.IGNORECASE | re.DOTALL)
         if nested_xml_type:
@@ -1419,6 +1431,7 @@ class BrowserUseCUAClient(AgentClient):
         elif action_type == "input_text":
             index = params.get("index")
             css_selector = params.get("css_selector")
+            element_text = params.get("element_text")  # Find by placeholder/label text
             # Sanitize text as a final safeguard against XML artifacts
             text = self._sanitize_text_value(params.get("text", ""))
 
@@ -1437,6 +1450,32 @@ class BrowserUseCUAClient(AgentClient):
                         if box:
                             x = int(box["x"] + box["width"] / 2)
                             y = int(box["y"] + box["height"] / 2)
+                except Exception:
+                    pass
+            elif element_text and self.handler and self.handler.page:
+                # Find input by placeholder, aria-label, or associated label text
+                try:
+                    selectors_to_try = [
+                        f"input[placeholder='{element_text}']",
+                        f"input[placeholder*='{element_text}' i]",  # Case-insensitive contains
+                        f"input[aria-label='{element_text}']",
+                        f"input[aria-label*='{element_text}' i]",
+                        f"input[name='{element_text}']",
+                        f"textarea[placeholder='{element_text}']",
+                        f"textarea[placeholder*='{element_text}' i]",
+                        f"[contenteditable][aria-label*='{element_text}' i]",
+                    ]
+                    for selector in selectors_to_try:
+                        try:
+                            element = await self.handler.page.query_selector(selector)
+                            if element:
+                                box = await element.bounding_box()
+                                if box:
+                                    x = int(box["x"] + box["width"] / 2)
+                                    y = int(box["y"] + box["height"] / 2)
+                                    break
+                        except Exception:
+                            continue
                 except Exception:
                     pass
 
