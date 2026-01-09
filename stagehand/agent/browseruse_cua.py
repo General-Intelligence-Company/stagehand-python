@@ -700,6 +700,53 @@ class BrowserUseCUAClient(AgentClient):
                     else:
                         actions.append(parsed_actions)
 
+        # Pattern 2.5: Standalone action tags like <scroll_to_bottom />, <go_back />, etc.
+        # These are self-closing tags without attributes
+        standalone_self_closing = re.findall(
+            r'<(scroll_to_bottom|scroll_to_top|go_back|refresh|wait)\s*/>',
+            completion, re.IGNORECASE
+        )
+        for tag_name in standalone_self_closing:
+            tag_lower = tag_name.lower()
+            if tag_lower == "scroll_to_bottom":
+                actions.append({"scroll": {"direction": "down", "amount": "page"}})
+            elif tag_lower == "scroll_to_top":
+                actions.append({"scroll": {"direction": "up", "amount": "page"}})
+            elif tag_lower == "go_back":
+                actions.append({"go_back": {}})
+            elif tag_lower == "refresh":
+                actions.append({"navigate": {"url": "reload"}})
+            elif tag_lower == "wait":
+                actions.append({"wait": {"seconds": 2}})
+
+        # Pattern 2.6: Standalone action tags with content like <scroll_to_bottom></scroll_to_bottom>
+        standalone_content = re.findall(
+            r'<(scroll_to_bottom|scroll_to_top|go_back|refresh|wait)>\s*</\1>',
+            completion, re.IGNORECASE
+        )
+        for tag_name in standalone_content:
+            tag_lower = tag_name.lower()
+            if tag_lower == "scroll_to_bottom":
+                actions.append({"scroll": {"direction": "down", "amount": "page"}})
+            elif tag_lower == "scroll_to_top":
+                actions.append({"scroll": {"direction": "up", "amount": "page"}})
+            elif tag_lower == "go_back":
+                actions.append({"go_back": {}})
+            elif tag_lower == "refresh":
+                actions.append({"navigate": {"url": "reload"}})
+            elif tag_lower == "wait":
+                actions.append({"wait": {"seconds": 2}})
+
+        # Pattern 2.7: Execute script tags <execute_script>...</execute_script>
+        script_matches = re.findall(
+            r'<execute_script>\s*(.*?)\s*</execute_script>',
+            completion, re.DOTALL | re.IGNORECASE
+        )
+        for script in script_matches:
+            script = script.strip()
+            if script:
+                actions.append({"execute_script": {"script": script}})
+
         # Pattern 3: No tags - try to parse the whole completion as an action
         # Look for patterns like "Action: type_text(...)" or "type [2] text"
         if not actions:
@@ -1310,6 +1357,8 @@ class BrowserUseCUAClient(AgentClient):
                     "go_back",
                     "send_keys",
                     "search",
+                    "execute_script",
+                    "wait",
                 ]:
                     action_type = key
                     action_params = value if isinstance(value, dict) else {}
@@ -1448,13 +1497,22 @@ class BrowserUseCUAClient(AgentClient):
             }
 
         elif action_type == "scroll":
-            down = params.get("down", True)
+            # Support both old format (down, pages) and new format (direction, amount)
+            direction = params.get("direction", "down" if params.get("down", True) else "up")
+            amount = params.get("amount", "page")
             pages = params.get("pages", 1)
 
-            # Convert pages to pixels (approx 800px per page)
-            scroll_amount = int(pages * 800)
-            if not down:
-                scroll_amount = -scroll_amount
+            # Calculate scroll amount
+            if amount == "page":
+                scroll_pixels = self.viewport.get("height", 711) * pages
+            else:
+                scroll_pixels = int(pages * 800)
+
+            # Negative for scrolling up
+            if direction == "up":
+                scroll_pixels = -abs(scroll_pixels)
+            else:
+                scroll_pixels = abs(scroll_pixels)
 
             # Scroll in center of viewport
             center_x = self.viewport.get("width", 1288) // 2
@@ -1465,7 +1523,7 @@ class BrowserUseCUAClient(AgentClient):
                 "x": center_x,
                 "y": center_y,
                 "scroll_x": 0,
-                "scroll_y": scroll_amount,
+                "scroll_y": scroll_pixels,
             }
 
         elif action_type == "navigate":
@@ -1507,6 +1565,21 @@ class BrowserUseCUAClient(AgentClient):
                 "type": "function",
                 "name": "goto",
                 "arguments": FunctionArguments(url=url),
+            }
+
+        elif action_type == "execute_script":
+            script = params.get("script", "")
+            return {
+                "type": "function",
+                "name": "evaluate",
+                "arguments": FunctionArguments(expression=script),
+            }
+
+        elif action_type == "wait":
+            seconds = params.get("seconds", 2)
+            return {
+                "type": "wait",
+                "miliseconds": int(seconds * 1000),
             }
 
         return None

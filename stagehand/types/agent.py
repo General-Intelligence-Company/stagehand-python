@@ -81,8 +81,8 @@ class ScreenshotAction(BaseModel):
 
 
 class FunctionArguments(BaseModel):
-    url: str
-    # Add other function arguments as needed
+    url: Optional[str] = None
+    expression: Optional[str] = None  # For evaluate/execute_script functions
 
 
 class FunctionAction(BaseModel):

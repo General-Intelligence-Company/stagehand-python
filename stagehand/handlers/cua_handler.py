@@ -204,6 +204,9 @@ class CUAHandler:  # Computer Use Agent Handler
                     await self.page.go_forward()
                     await self.handle_page_navigation("navigate_forward", initial_url)
                     return {"success": True}
+                elif name == "evaluate" and args.expression:
+                    await self.page.evaluate(args.expression)
+                    return {"success": True}
                 # Add other function calls like reload if needed, similar to TS version
                 self.logger.error(
                     f"Unsupported function call: {name}",
